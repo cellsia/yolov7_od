@@ -1,0 +1,6 @@
+
+reportlab
+onnxsim
+PyPDF2
+onnxruntime
+fpdf
