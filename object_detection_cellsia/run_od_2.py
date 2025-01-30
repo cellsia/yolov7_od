@@ -141,7 +141,7 @@ def main():
     parser.add_argument("--img_size", type=int, default=1024, help="Tamaño de las imágenes (default: 1024)")
     parser.add_argument("--batch", type=int, default=16, help="Tamaño del batch (default: 16)" )
     parser.add_argument("--early_stopping_patience", type=int, default=50, help="Patience para early stopping (default: 10)")
-    parser.add_argument("--weights", type=str, default="../yolov7_training.pt", help="Ruta a los pesos preentrenados (default: ../yolov7_training.pt)" )
+    parser.add_argument("--weights", type=str, default="/app/yolov7_training.pt", help="Ruta a los pesos preentrenados (default: ../yolov7_training.pt)" )
 
     args = parser.parse_args()
 
@@ -187,11 +187,13 @@ def main():
 
     convert_to_onnx(best_weights_path)
 
-    onnx_file = latest_exp / "best.onnx"
+    onnx_file = latest_exp / "weights/best.onnx"
+    
     print(f"Modelo ONNX guardado en {onnx_file}")
+    '''
     trt_file = latest_exp / "best_model.trt"
     convert_to_trt(onnx_file, trt_file)
-
+    '''
 
 
 if __name__ == "__main__":
