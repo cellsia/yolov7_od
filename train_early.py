@@ -37,7 +37,7 @@ from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
 
 logger = logging.getLogger(__name__)
 
-
+#Early stopping integrated in the code
 class EarlyStopping:
     def __init__(self, save_dir, patience, verbose=False, delta=0):
         self.patience = patience
