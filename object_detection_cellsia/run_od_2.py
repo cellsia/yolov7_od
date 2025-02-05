@@ -115,7 +115,7 @@ def convert_to_onnx(weights_path):
     print("Convirtiendo a ONNX...")
     subprocess.run([
         "python", "export.py",
-        "--weights", str(weights_path),
+        "--weights", str(weights_path),"--img-size", "1024",
         "--grid", "--dynamic", "--simplify"
     ])
 
