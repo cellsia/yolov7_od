@@ -178,7 +178,7 @@ def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_ima
                 det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0s.shape).round()
 
                 for *xyxy, conf, cls in reversed(det):
-                    predicted_class = int(cls) 
+                    predicted_class = int(cls)
                     print(predicted_class)
                     detected_classes[predicted_class] = detected_classes.get(predicted_class, 0) + 1
 
@@ -245,7 +245,7 @@ def main(input_dir, session, input_name, output_name, img_size,conf_thres, iou_t
             with open(label_path, "r") as f:
                 for line in f:
                     # Leer la clase desde la primera columna
-                    label = int(line.strip().split()[0]) + 1
+                    label = int(line.strip().split()[0]) 
                     expected_classes[label] = expected_classes.get(label, 0) + 1
 
                                         # Leer clase y coordenadas

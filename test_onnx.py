@@ -176,6 +176,10 @@ def test(data,
             # Run model
             t = time_synchronized()
             if is_onnx:
+                print("output_name")
+                print(output_name)
+                print("img shape")
+                print(img.shape)
                 preds = model.run([output_name], {input_name: img})[0]
                 out = torch.tensor(preds).to(device)  # Convertir a tensor para usar con el resto del código
                 train_out = None  # No se usa en ONNX
@@ -192,10 +196,13 @@ def test(data,
             targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
             lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
             t = time_synchronized()
+            print("output shape before non_max_supression")
+            print(out.shape)
             if is_onnx:
                 out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, multi_label=True)
             else:
                 out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
+                
             t1 += time_synchronized() - t
 
         # Statistics per image

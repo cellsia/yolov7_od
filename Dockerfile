@@ -17,7 +17,7 @@ RUN pip install -r /app/yolov7/requirements.txt
 
 RUN wget https://github.com/WongKinYiu/yolov7/releases/download/v0.1/yolov7_training.pt -P /app
 
-#ENTRYPOINT ["python", "/app/main.py"]
-CMD ["tail", "-f", "/dev/null"]
+ENTRYPOINT ["python", "/app/yolov7/object_detection_cellsia/main2.py"]
+#CMD ["tail", "-f", "/dev/null"]
 
 
