@@ -15,7 +15,7 @@ import sys
 
 from Opt import Opt
 sys.path.append('/app/yolov7')
-import test_
+import test_onnx as test_onnx
 from models.experimental import attempt_load
 from utils.datasets import LoadStreams, LoadImages
 from utils.general import check_img_size, check_requirements, check_imshow, non_max_suppression, apply_classifier, \
@@ -31,27 +31,27 @@ from utils.general import scale_coords
 from utils.metrics import ap_per_class
 from report import generate_pdf_with_front_page
 
+
 def load_model(weights, device):
     device = select_device(device)
 
-    model = attempt_load(weights, map_location=device)  # Cargar el modelo 
-    half = device.type != 'cpu'  # Habilitar precisión FP16 solo en GPU
+    session = ort.InferenceSession(weights, 
+                                providers=["CUDAExecutionProvider" if device.type != 'cpu' else "CPUExecutionProvider"])
+    input_name = session.get_inputs()[0].name
+    output_name = session.get_outputs()[0].name
+    print("Modelo cargado .onnx y dispositivo configurado.")
+    return session, input_name, output_name
 
-    # Configurar el modelo para FP16 si está en GPU
-    if half:
-        model.half()
-        
-    print("Modelo cargado .pt y dispositivo configurado.")
-    return model, half
+def get_names_colors(data_config):
 
-def get_names_colors(model):
-
-    names = model.module.names if hasattr(model, 'module') else model.names
-
+    with open(data_config, 'r') as f:
+        data = yaml.safe_load(f)
+    names = data.get('names', []) 
     
     colors = {int(i): (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)) for i in range(len(names))}
     
     class_colors = {int(name): colors[i] for i, name in enumerate(names)}
+
 
     true_colors = {}
     for cls_id in range(len(names)):
@@ -60,10 +60,12 @@ def get_names_colors(model):
             if color != colors[cls_id]:  # Asegurarse de que no coincidan
                 true_colors[cls_id] = color
                 break
-
     
+    #class_colors = {name: tuple(color) for name, color in zip(names, colors)}
+
     print("Nombres de clases y colores configurados:")
     print("Clases:", names)
+    print(class_colors)
     #print("Ejemplo de colores:", colors[:3])  # Imprimir algunos colores de ejemplo
 
     return names, class_colors
@@ -75,7 +77,7 @@ def configurar_rutas(input_dir, output_dir, key):
     output_dir = Path(output_dir)
     dataset_dir = input_dir / "dataset"
     base_path = Path(dataset_dir)
-    save_dir = output_dir / "resultados" / "pt"
+    save_dir = output_dir / "resultados" / "onnx"
     save_dir.mkdir(parents=True, exist_ok=True)
     labels_dir = dataset_dir / "labels"
     print(f"Directorio de salida guardado configurado en: {save_dir}")
@@ -122,25 +124,38 @@ def leer_rutas_imagenes(base_path, txt_file_path):
     print(f"Se encontraron {len(image_paths)} rutas en el archivo .txt.")
     return image_paths
 
+def preprocesar_imagen(img, im0s, img_size):
+    """
+    Preprocesa una imagen para la inferencia en ONNX.
+    """
+    expected_size = (img_size, img_size)
 
-def preprocesar_imagen(img, device, half):
-    """
-    Preprocesa una imagen para la inferencia.
-    """
-    img = torch.from_numpy(img).to(device)
-    img = img.half() if half else img.float()
-    img /= 255.0  # Normalizar
-    if img.ndimension() == 3:
-        img = img.unsqueeze(0)
+    # Si la imagen está en formato (C, H, W), convertirla a (H, W, C)
+    if img.shape[0] == 3 and len(img.shape) == 3:
+        img = img.transpose(1, 2, 0)  # (C, H, W) → (H, W, C)
+        print(f"Imagen transpuesta a: {img.shape}")
+
+    if img is None:
+        raise ValueError("La imagen no se cargó correctamente.")
+
+    img = cv2.resize(img, expected_size, interpolation=cv2.INTER_LINEAR)
+
+    if img.shape[-1] != 3:
+        raise ValueError(f"La imagen tiene un número inesperado de canales: {img.shape}")
+
+    img = img.transpose(2, 0, 1)  # (H, W, C) → (C, H, W)
+
+    img = np.expand_dims(img, axis=0).astype(np.float32) / 255.0
+
     return img
 
-def realizar_inferencia(model, img, augment, conf_thres, iou_thres, classes, agnostic_nms):
+
+def realizar_inferencia(img, session, input_name, output_name, conf_thres, iou_thres, classes, agnostic_nms):
     """
     Realiza la inferencia en el modelo y aplica NMS.
     """
-    
-    with torch.no_grad():
-            preds = model(img, augment=augment)[0]
+    preds = session.run([output_name], {input_name: img})[0]
+    preds = torch.tensor(preds)  # Convertir a tensor
 
     pred = non_max_suppression(preds, conf_thres, iou_thres, classes=classes, agnostic=agnostic_nms)
     return pred
@@ -163,7 +178,8 @@ def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_ima
                 det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0s.shape).round()
 
                 for *xyxy, conf, cls in reversed(det):
-                    predicted_class = int(cls)  # Clase predicha
+                    predicted_class = int(cls)
+                    print(predicted_class)
                     detected_classes[predicted_class] = detected_classes.get(predicted_class, 0) + 1
 
                     # Extraer coordenadas de las cajas detectadas
@@ -179,10 +195,14 @@ def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_ima
                             f"{width / im0s.shape[1]:.6f} {height / im0s.shape[0]:.6f} {conf:.6f}\n")
 
                     # Dibujar detección predicha en la imagen
-                    label = f'{names[predicted_class]} {conf:.2f}'
+                    #label = f'{names[predicted_class]} {conf:.2f}'
+                    print(f"Clase detectada: {predicted_class}, Color usado para pintar: {colors.get(predicted_class, 'No encontrado')}")
+                    # Convierte el color de la caja de RGB a BGR
                     bgr_color = (colors[predicted_class][2], colors[predicted_class][1], colors[predicted_class][0])
 
+                    # Usa el color en formato BGR para que coincida con la imagen
                     plot_one_box(xyxy, im0s, color=bgr_color, line_thickness=2)
+
             '''
             # Añadir etiquetas reales (clases esperadas)
             for expected_class, bboxes in expected_classes_coordinates.items():
@@ -198,6 +218,7 @@ def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_ima
         processed_img_path = processed_images_dir / f"{Path(path).stem}_processed.jpg"
 
         cv2.imwrite(str(processed_img_path), im0s)
+
         print(f"Imagen procesada guardada en: {processed_img_path}")
 
         image_examples.append((str(processed_img_path), expected_classes, detected_classes))
@@ -206,8 +227,7 @@ def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_ima
         print(" - No se encontraron detecciones válidas tras aplicar NMS.")
     return image_examples
 
-
-def main(input_dir, img_size, model, device, half, conf_thres, iou_thres, classes, augment, names, data_config, weights, output_dir, key, class_colors, max_examples=20):
+def main(input_dir, session, input_name, output_name, img_size,conf_thres, iou_thres, classes, augment, names, data_config, weights, output_dir, key, class_colors, max_examples=20):
     base_path,  labels_dir, labels_dir2, processed_images_dir = configurar_rutas(input_dir, output_dir, key)
     txt_file_path = obtener_ruta_desde_yaml(data_config, key=key)
     image_paths = leer_rutas_imagenes(base_path, txt_file_path)
@@ -247,21 +267,22 @@ def main(input_dir, img_size, model, device, half, conf_thres, iou_thres, classe
             print(f"Advertencia: No se encontró el archivo de etiquetas para {img_path}")
 
         # Cargar imágenes
-        dataset = LoadImages(img_path, img_size=img_size, stride=int(model.stride.max()))
+        dataset = LoadImages(img_path, img_size=img_size)
 
         
         #for path, img, im0s, vid_cap in dataset:
         path, img, im0s, vid_cap = next(iter(dataset))
 
-        img = preprocesar_imagen(img, device, half)
-        pred = realizar_inferencia(model, img, augment=augment, conf_thres=conf_thres, iou_thres=iou_thres, classes=classes, agnostic_nms=False)
         
+        img = preprocesar_imagen(img, im0s, img_size)
+        pred = realizar_inferencia(img, session, input_name=input_name, output_name=output_name, conf_thres=conf_thres, iou_thres=iou_thres, classes=classes, agnostic_nms=False)
+           
         txt_path = labels_dir2 / f"{Path(path).stem}.txt"
-        image_examples = procesar_detecciones(pred, img, im0s, names, class_colors, txt_path, processed_images_dir, path, image_examples, expected_classes)
+        image_examples = procesar_detecciones(pred, img, im0s, names,class_colors, txt_path, processed_images_dir, path, image_examples, expected_classes)
 
            # break
 
-    test_.opt = Opt(key)
+    test_onnx.opt = Opt(key)
 
     print(data_config)
 
@@ -271,7 +292,7 @@ def main(input_dir, img_size, model, device, half, conf_thres, iou_thres, classe
     if not isinstance(data, dict):
         raise ValueError("Error: El archivo YAML no se cargó correctamente como un diccionario.")
 
-    results, maps, times, metrics_class = test_.test(
+    results, maps, times, metrics_class = test_onnx.test(
         data=data,
         weights=weights,
         batch_size=8,
@@ -300,7 +321,7 @@ def main(input_dir, img_size, model, device, half, conf_thres, iou_thres, classe
         "times": times
     }
 
-    out = output_dir +  "/" + key + "_" + "pt" + "_" "report.pdf"  # Concatenación directa
+    out = output_dir +  "/" + key + "_" + "onnx" + "_" "report.pdf"  # Concatenación directa
 
     generate_pdf_with_front_page(
         pdf_path=out,
@@ -315,9 +336,6 @@ def main(input_dir, img_size, model, device, half, conf_thres, iou_thres, classe
     )
     
     return None
-
-
-
 
 
 if __name__ == "__main__":
@@ -350,27 +368,29 @@ if __name__ == "__main__":
     data_config = yaml_files[0]
     print(f"Archivo de configuración encontrado: {data_config}")
     
-    model,  half = load_model(args.weights, device)
-    names, class_colors = get_names_colors(model)
+    session, input_name, output_name = load_model(args.weights, device)
+    for input in session.get_inputs():
+        print(f"Nombre de entrada: {input.name}, Forma esperada: {input.shape}, Tipo: {input.type}")
+    names, class_colors = get_names_colors(data_config)
 
 
-    print(f"Device: {device}, Half precision: {half}")
+    #print(f"Device: {device}, Half precision: {half}")
 
     main(
-        input_dir=input_dir_path,
-        img_size=args.img_size,
-        model=model,
-        device=device,
-        half=half,
-        conf_thres=args.conf_thres,
-        iou_thres=args.iou_thres,
-        classes=None,
-        augment=args.augment,
-        names=names,
-        data_config=data_config,
-        weights=args.weights,
-        output_dir=args.output_dir,
-        key = args.key,
-        class_colors=class_colors,
-        max_examples=args.max_examples
-    )
+            input_dir=input_dir_path,
+            session = session,
+            input_name=input_name,
+            output_name=output_name,
+            img_size=args.img_size,
+            conf_thres=args.conf_thres,
+            iou_thres=args.iou_thres,
+            classes=None,
+            augment=args.augment,
+            names=names,
+            data_config=data_config,
+            weights=args.weights,
+            output_dir=args.output_dir,
+            key = args.key,
+            class_colors=class_colors,
+            max_examples=args.max_examples
+        )
