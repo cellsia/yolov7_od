@@ -24,7 +24,7 @@ def test(data,
          batch_size=32,
          imgsz=640,
          conf_thres=0.001,
-         iou_thres=0.6,  # for NMS
+         iou_thres=0.5,  # for NMS
          save_json=False,
          single_cls=False,
          augment=False,
@@ -367,6 +367,17 @@ def test(data,
         except Exception as e:
             print(f'pycocotools unable to run: {e}')
 
+    # Añadir contadores de imágenes
+    total_images = len(dataloader.dataset)  # Total de imágenes en el dataset
+    total_processed = seen  # Imágenes procesadas
+
+    # Añadir el conteo a las métricas de retorno
+    dataset_stats = {
+        'total_images': total_images,
+        'processed_images': total_processed,
+        'total_labels': int(nt.sum())
+    }
+
     # Return results
     #model.float()  # for training
     if not training:
@@ -375,7 +386,7 @@ def test(data,
     maps = np.zeros(nc) + map
     for i, c in enumerate(ap_class):
         maps[c] = ap[i]
-    return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t, class_metrics
+    return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t, class_metrics, dataset_stats
 
 
 if __name__ == '__main__':

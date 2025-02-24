@@ -39,22 +39,26 @@ logger = logging.getLogger(__name__)
 
 
 class EarlyStopping:
-    def __init__(self, save_dir, patience, verbose=False, delta=0):
+    def __init__(self, save_dir, patience, verbose=False, delta=0, start_epoch=50):
         self.patience = patience
         self.verbose = verbose
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.val_loss_min = float('inf')
+        self.metric_max = float('-inf')
         self.delta = delta
         self.save_dir = save_dir
+        self.start_epoch = start_epoch
 
-    def __call__(self, val_loss, model):
-        score = -val_loss
+    def __call__(self, metric, model, epoch):
+        if epoch < self.start_epoch:
+            return
+
+        score = metric
 
         if self.best_score is None:
             self.best_score = score
-            self.save_checkpoint(val_loss, model)
+            self.save_checkpoint(metric, model)
         elif score < self.best_score + self.delta:
             self.counter += 1
             if self.verbose:
@@ -63,20 +67,21 @@ class EarlyStopping:
                 self.early_stop = True
         else:
             self.best_score = score
-            self.save_checkpoint(val_loss, model)
+            self.save_checkpoint(metric, model)
             self.counter = 0
 
-    def save_checkpoint(self, val_loss, model):
-        '''Saves model when validation loss decrease.'''
+    def save_checkpoint(self, metric, model):
+        '''Saves model when validation metric increases.'''
         if self.verbose:
-            print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
-        self.val_loss_min = val_loss
+            print(f'Validation metric increased ({self.metric_max:.6f} --> {metric:.6f}).  Saving model ...')
+        self.metric_max = metric
         # Save the model (you can customize the path)
         save = self.save_dir / 'weights' / 'checkpoint.pt'
         torch.save(model.state_dict(), save)
 
 
 def train(hyp, opt, device, tb_writer=None):
+    logger = logging.getLogger('train_early')
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
     save_dir, epochs, batch_size, total_batch_size, weights, rank, freeze, patience = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank, opt.freeze, opt.patience
@@ -218,7 +223,11 @@ def train(hyp, opt, device, tb_writer=None):
     if opt.adam:
         optimizer = optim.Adam(pg0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
     else:
-        optimizer = optim.SGD(pg0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
+        optimizer = optim.Adam(pg0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
+    
+        #optimizer = optim.AdamW(pg0, lr=hyp['lr0'], betas=(0.9, 0.95), weight_decay=0.1)  # usar AdamW con betas de Llama 2
+    
+        #optimizer = optim.SGD(pg0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
 
     optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # add pg1 with weight_decay
     optimizer.add_param_group({'params': pg2})  # add pg2 (biases)
@@ -470,7 +479,7 @@ def train(hyp, opt, device, tb_writer=None):
                                                 v5_metric=opt.v5_metric)
                 # Early stopping
                 print(results)
-                early_stopping( results[-1], model)
+                early_stopping(results[2], model, epoch)  # Use mAP@.5 as the metric for early stopping
 
                 if early_stopping.early_stop:
                     print("Early stopping")
@@ -492,6 +501,13 @@ def train(hyp, opt, device, tb_writer=None):
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb_logger.wandb:
                     wandb_logger.log({tag: x})  # W&B
+
+            # Mostrar métricas de cada época
+            metrics_msg = (f'\nEpoch {epoch}/{epochs - 1}:'
+                          f'\n * Loss - Box: {mloss[0]:.3f}, Obj: {mloss[1]:.3f}, Cls: {mloss[2]:.3f}, Total: {mloss[3]:.3f}'
+                          f'\n * Metrics - Precision: {results[0]:.3f}, Recall: {results[1]:.3f}, mAP@0.5: {results[2]:.3f}, mAP@0.5:0.95: {results[3]:.3f}'
+                          f'\n * Learning Rate - lr0: {lr[0]}, lr1: {lr[1]}, lr2: {lr[2]}')
+            logger.info(metrics_msg)
 
             # Update best mAP
             fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]

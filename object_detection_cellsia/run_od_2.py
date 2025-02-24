@@ -1,19 +1,21 @@
 import os
 import sys
-import shutil
 import subprocess
 import argparse
 from pathlib import Path
+import logging
+from logging_utils import setup_global_logging
+
 os.chdir("/app/yolov7")
 
 def replace_relative_paths(yaml_file, input_dir):
-    print(f"Reemplazando '../' en {yaml_file} con {input_dir}...")
+    logging.info(f"Reemplazando '../' en {yaml_file} con {input_dir}...")
     with open(yaml_file, 'r') as file:
         content = file.read()
     content = content.replace('../', f"{input_dir}/")
     with open(yaml_file, 'w') as file:
         file.write(content)
-    print(f"Reemplazo completado: '../' cambiado por '{input_dir}' en {yaml_file}.")
+    logging.info(f"Reemplazo completado: '../' cambiado por '{input_dir}' en {yaml_file}.")
 
 def convert_to_trt(onnx_path, output_trt_path, precision="fp16"):
     """
@@ -26,10 +28,10 @@ def convert_to_trt(onnx_path, output_trt_path, precision="fp16"):
     """
 
     # Verificar si el archivo ONNX existe
-    print("hola")
+    logging.info("hola")
     onnx_path = Path(onnx_path)
     if not onnx_path.is_file():
-        print(f"Error: El archivo ONNX '{onnx_path}' no existe.")
+        logging.error(f"Error: El archivo ONNX '{onnx_path}' no existe.")
         return
 
     # Asegurar que el directorio de salida exista
@@ -39,13 +41,13 @@ def convert_to_trt(onnx_path, output_trt_path, precision="fp16"):
     # Clonar tensorrt-python si no está presente
     repo_path = Path("tensorrt-python")
     if not repo_path.exists():
-        print("Clonando tensorrt-python...")
+        logging.info("Clonando tensorrt-python...")
         subprocess.run(["git", "clone", "https://github.com/Linaom1214/tensorrt-python.git"], check=True)
     else:
-        print("Repositorio tensorrt-python ya clonado, continuando...")
+        logging.info("Repositorio tensorrt-python ya clonado, continuando...")
 
     # Ejecutar la conversión
-    print(f"Convirtiendo {onnx_path} a TensorRT ({precision})...")
+    logging.info(f"Convirtiendo {onnx_path} a TensorRT ({precision})...")
     subprocess.run([
         "python", str(repo_path / "export.py"),
         "-o", str(onnx_path),
@@ -53,11 +55,11 @@ def convert_to_trt(onnx_path, output_trt_path, precision="fp16"):
         "-p", "fp16"
     ], check=True)
 
-    print(f"Conversión completada: {output_trt_path}")
+    logging.info(f"Conversión completada: {output_trt_path}")
 
 
 def convert_to_absolute(yaml_file, base_dir):
-    print(f"Procesando archivo YAML: {yaml_file}")
+    logging.info(f"Procesando archivo YAML: {yaml_file}")
     temp_file = f"{yaml_file}.tmp"
     with open(yaml_file, 'r') as infile, open(temp_file, 'w') as outfile:
         for line in infile:
@@ -72,62 +74,87 @@ def convert_to_absolute(yaml_file, base_dir):
             else:
                 outfile.write(line)
     os.replace(temp_file, yaml_file)
-    print(f"Rutas convertidas a absolutas en {yaml_file}")
+    logging.info(f"Rutas convertidas a absolutas en {yaml_file}")
 
 
 def clean_cache_files(base_dir):
-    print(f"Eliminando archivos .cache en {base_dir}...")
+    logging.info(f"Eliminando archivos .cache en {base_dir}...")
     for cache_file in Path(base_dir).rglob("*.cache"):
         cache_file.unlink()
-    print("Eliminación de archivos .cache completada.")
+    logging.info("Eliminación de archivos .cache completada.")
 
 
 def train_yolov7(data_config, output_dir, epochs, img_size, weights, batch, early_stopping_patience):
-    print("Iniciando el entrenamiento de YOLOv7...")
-    subprocess.run([
-        "python", "train_early.py",
-        "--img", str(img_size),
-        "--batch", str(batch),
-        "--epochs", str(epochs),
-        "--data", str(data_config),
-        "--weights", str(weights),
-        "--project", output_dir,
-        "--name", "yolo_experiment",
-        "--hyp", "/data/hyp.scratch.custom.yaml",
-        "--patience", str(early_stopping_patience)
-    ])
-    print("Entrenamiento completado.")
+    logger = logging.getLogger('run_od_2')
+    logger.info("Iniciando el entrenamiento de YOLOv7...")
+    
+    try:
+        process = subprocess.Popen([
+            "python", "train_early.py",
+            "--img", str(img_size),
+            "--batch", str(batch),
+            "--epochs", str(epochs),
+            "--data", str(data_config),
+            "--weights", str(weights),
+            "--project", output_dir,
+            "--name", "yolo_experiment",
+            "--hyp", "/data/hyp.scratch.custom.yaml",
+            "--patience", str(early_stopping_patience)
+        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+
+        for line in process.stdout:
+            line = line.strip()
+            if line:
+                if any(keyword in line for keyword in ['Epoch', 'Loss', 'Metrics', 'Learning Rate']):
+                    logger.info(line)
+                elif 'error' in line.lower():
+                    logger.error(line)
+                elif 'warning' in line.lower():
+                    logger.warning(line)
+                else:
+                    logger.debug(line)
+
+        process.wait()
+        if process.returncode != 0:
+            logging.error("El entrenamiento falló")
+            sys.exit(1)
+            
+    except Exception as e:
+        logging.error(f"Error durante el entrenamiento: {str(e)}")
+        sys.exit(1)
+
+    logging.info("Entrenamiento completado.")
 
 def save_best_model(output_dir):
     experiments = sorted(Path(output_dir).glob("yolo_experiment*"), key=os.path.getmtime, reverse=True)
     if not experiments:
-        print(f"No se encontró ningún experimento en {output_dir}")
+        logging.error(f"No se encontró ningún experimento en {output_dir}")
         sys.exit(1)
 
     latest_experiment = experiments[0]
-    print(f"Último experimento encontrado: {latest_experiment}")
+    logging.info(f"Último experimento encontrado: {latest_experiment}")
 
     best_weights_path = latest_experiment / "weights/best.pt"
 
     return best_weights_path, latest_experiment
 
 def convert_to_onnx(weights_path):
-    print("Convirtiendo a ONNX...")
+    logging.info("Convirtiendo a ONNX...")
     subprocess.run([
         "python", "export.py",
         "--weights", str(weights_path),"--img-size", "1024",
-        "--grid", "--dynamic", "--simplify"
+        "--grid", "--dynamic", "--simplify",  "--batch-size", "1"
     ])
 
 
 
 def clean_temp_files(output_dir):
-    print("Limpiando archivos temporales y caché...")
+    logging.info("Limpiando archivos temporales y caché...")
     for temp_file in Path(output_dir).rglob("*.tmp"):
         temp_file.unlink()
     for log_file in Path(output_dir).rglob("*.log"):
         log_file.unlink()
-    print("Limpieza completada.")
+    logging.info("Limpieza completada.")
 
 
 def main():
@@ -141,30 +168,35 @@ def main():
     parser.add_argument("--img_size", type=int, default=1024, help="Tamaño de las imágenes (default: 1024)")
     parser.add_argument("--batch", type=int, default=16, help="Tamaño del batch (default: 16)" )
     parser.add_argument("--early_stopping_patience", type=int, default=50, help="Patience para early stopping (default: 10)")
-    parser.add_argument("--weights", type=str, default="/app/yolov7_training.pt", help="Ruta a los pesos preentrenados (default: ../yolov7_training.pt)" )
+    parser.add_argument("--weights", type=str, default="/app/yolov7-w6.pt", help="Ruta a los pesos preentrenados (default: ../yolov7_training.pt)" )
 
     args = parser.parse_args()
 
-    print(f"Directorio de entrada: {args.input_dir}")
-    print(f"Directorio de salida: {args.output_dir}")
-    print(f"Épocas: {args.epochs}")
-    print(f"Tamaño de imagen: {args.img_size}")
-    print(f"Batch size: {args.batch}")
-    print(f"Patience de early stopping: {args.early_stopping_patience}")
-    print(f"Pesos: {args.weights}")
+    # Configurar el logging global
+    log_file = setup_global_logging(args.output_dir)
+    logger = logging.getLogger('run_od_2')
+    logger.info(f"Los logs se guardarán en: {log_file}")
+
+    logger.info(f"Directorio de entrada: {args.input_dir}")
+    logger.info(f"Directorio de salida: {args.output_dir}")
+    logger.info(f"Épocas: {args.epochs}")
+    logger.info(f"Tamaño de imagen: {args.img_size}")
+    logger.info(f"Batch size: {args.batch}")
+    logger.info(f"Patience de early stopping: {args.early_stopping_patience}")
+    logger.info(f"Pesos: {args.weights}")
 
     input_dir_path = Path(args.input_dir)
     if not input_dir_path.is_dir():
-        print(f"El directorio de entrada {args.input_dir} no existe.")
+        logger.error(f"El directorio de entrada {args.input_dir} no existe.")
         sys.exit(1)
 
     yaml_files = list(input_dir_path.rglob("*.yaml"))
     if not yaml_files:
-        print(f"No se encontró ningún archivo .yaml en el directorio de entrada {args.input_dir}.")
+        logger.error(f"No se encontró ningún archivo .yaml en el directorio de entrada {args.input_dir}.")
         sys.exit(1)
 
     data_config = yaml_files[0]
-    print(f"Archivo de configuración encontrado: {data_config}")
+    logger.info(f"Archivo de configuración encontrado: {data_config}")
 
     # Procesar archivo YAML
     replace_relative_paths(data_config, str(input_dir_path))
@@ -175,9 +207,9 @@ def main():
 
     weights_path = Path(args.weights)
     if not weights_path.is_file():
-        print(f"El archivo de pesos preentrenados {args.weights} no existe.")
+        logger.error(f"El archivo de pesos preentrenados {args.weights} no existe.")
         sys.exit(1)
-    print(f"Archivo de pesos preentrenados encontrado: {args.weights}")
+    logger.info(f"Archivo de pesos preentrenados encontrado: {args.weights}")
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -189,7 +221,7 @@ def main():
 
     onnx_file = latest_exp / "weights/best.onnx"
     
-    print(f"Modelo ONNX guardado en {onnx_file}")
+    logger.info(f"Modelo ONNX guardado en {onnx_file}")
     '''
     trt_file = latest_exp / "best_model.trt"
     convert_to_trt(onnx_file, trt_file)

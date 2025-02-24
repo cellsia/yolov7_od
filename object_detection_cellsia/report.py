@@ -75,7 +75,7 @@ def create_legend(class_colors):
 
 
 
-def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class_names, class_colors, max_examples, metrics_classes, image_examples=None):
+def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class_names, class_colors, max_examples, metrics_classes, dataset_stats, confidence_ranges, image_examples=None):
     doc = SimpleDocTemplate(pdf_path, pagesize=letter)
     elements = []
     styles = getSampleStyleSheet()
@@ -101,7 +101,9 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
     elements.append(Paragraph(f"Task: <b>Object Detection</b>", styles['Normal']))
     elements.append(Spacer(1, 5))
     elements.append(Paragraph(f"Dataset: <b>{data_name}</b>", styles['Normal']))
-    elements.append(Spacer(1, 20))
+    elements.append(Spacer(1, 5))
+    elements.append(Paragraph(f"Number of images: <b>{str(dataset_stats['total_images'])}</b>", styles['Normal']))
+    elements.append(Spacer(1, 5))
    
 
     # Crear tabla de métricas
@@ -124,6 +126,7 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
             cls_name
         ])
 
+
     # Configurar y añadir tabla de métricas
     metrics_table = Table(metrics_data, colWidths=[80, 80, 80, 80, 80])
     metrics_table.setStyle(TableStyle([
@@ -141,6 +144,30 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
     ]))
     elements.append(metrics_table)
     elements.append(Spacer(1, 20))
+
+    # Añadir tabla de distribución de confianza para predicciones
+    confidence_data = [["Confidence Range (%)", "Correct Predictions", "Wrong Predictions"]]
+    for range_key, values in confidence_ranges.items():
+        confidence_data.append([
+            range_key, 
+            str(values['correct']), 
+            str(values['incorrect'])
+        ])
+
+    confidence_table = Table(confidence_data, colWidths=[100, 100, 100])
+    confidence_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), HexColor("#1b2a41")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+    ]))
+
+    elements.append(Paragraph("Distribution of Wrong Predictions by Confidence", styles['Heading2']))
+    elements.append(Spacer(1, 10))
+    elements.append(confidence_table)
+    elements.append(Spacer(1, 20))
+    
     elements.append(create_signature_box())
     elements.append(Spacer(1, 40))
 
@@ -188,6 +215,8 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
             except Exception as e:
                 elements.append(Paragraph(f"Error loading image: {e}", styles['Normal']))
             elements.append(Spacer(1, 20))
+
+    
 
     # Generar PDF
     doc.build(elements)

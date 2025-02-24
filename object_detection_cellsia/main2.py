@@ -55,7 +55,7 @@ def main():
     parser.add_argument('--batch', type=int, default=16, help="Tamaño del batch.")
     parser.add_argument('--early_stopping_patience', type=int, default=50, help="Paciencia para early stopping.")
     parser.add_argument('--conf_thres', type=float, default=0.25, help="Umbral de confianza.")
-    parser.add_argument('--iou_thres', type=float, default=0.45, help="Umbral de IoU.")
+    parser.add_argument('--iou_thres', type=float, default=0.5, help="Umbral de IoU.")
     parser.add_argument('--run_train', action='store_true', help="Ejecutar inferencia en el conjunto train.")
     parser.add_argument('--run_test', action='store_true', help="Ejecutar inferencia en el conjunto test.")
     parser.add_argument('--run_val', action='store_true', help="Ejecutar inferencia en el conjunto val.")
