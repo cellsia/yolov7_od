@@ -389,9 +389,10 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.label_files = img2label_paths(self.img_files)  # labels
         cache_path = (p if p.is_file() else Path(self.label_files[0]).parent).with_suffix('.cache')  # cached labels
         if cache_path.is_file():
-            cache, exists = torch.load(cache_path), True  # load
-            #if cache['hash'] != get_hash(self.label_files + self.img_files) or 'version' not in cache:  # changed
-            #    cache, exists = self.cache_labels(cache_path, prefix), False  # re-cache
+            try:
+                cache, exists = torch.load(cache_path, weights_only=True), True  # load
+            except Exception as e:
+                cache, exists = self.cache_labels(cache_path, prefix), False  # cache
         else:
             cache, exists = self.cache_labels(cache_path, prefix), False  # cache
 
@@ -668,14 +669,18 @@ def load_image(self, index):
     img = self.imgs[index]
     if img is None:  # not cached
         path = self.img_files[index]
-        img = cv2.imread(path)  # BGR
-        assert img is not None, 'Image Not Found ' + path
-        h0, w0 = img.shape[:2]  # orig hw
-        r = self.img_size / max(h0, w0)  # resize image to img_size
-        if r != 1:  # always resize down, only resize up if training with augmentation
-            interp = cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR
-            img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
-        return img, (h0, w0), img.shape[:2]  # img, hw_original, hw_resized
+        try:
+            img = cv2.imread(path)  # BGR
+            assert img is not None, 'Image Not Found ' + path
+            h0, w0 = img.shape[:2]  # orig hw
+            r = self.img_size / max(h0, w0)  # resize image to img_size
+            if r != 1:  # always resize down, only resize up if training with augmentation
+                interp = cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR
+                img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
+            return img, (h0, w0), img.shape[:2]  # img, hw_original, hw_resized
+        except Exception as e:
+            print(f'Image load error: {path}: {e}')
+            return None, None, None
     else:
         return self.imgs[index], self.img_hw0[index], self.img_hw[index]  # img, hw_original, hw_resized
 

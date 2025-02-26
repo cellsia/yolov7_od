@@ -20,6 +20,8 @@ from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+import warnings
+warnings.filterwarnings('ignore')
 
 import test_early as test  # import test.py to get mAP after each epoch
 from models.experimental import attempt_load
@@ -338,8 +340,7 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Start training
     t0 = time.time()
-    nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations, max(3 epochs, 1k iterations)
-    # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
+    nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
     scheduler.last_epoch = start_epoch - 1  # do not move
@@ -381,7 +382,7 @@ def train(hyp, opt, device, tb_writer=None):
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
         pbar = enumerate(dataloader)
-        logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
+        #logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
@@ -405,16 +406,16 @@ def train(hyp, opt, device, tb_writer=None):
                 sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
                 sf = sz / max(imgs.shape[2:])  # scale factor
                 if sf != 1:
-                    ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
+                    ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
             # Forward
-            with amp.autocast(enabled=cuda):
+            with torch.amp.autocast(device_type='cuda', enabled=cuda):  # Corregir el autocast
                 pred = model(imgs)  # forward
                 if 'loss_ota' not in hyp or hyp['loss_ota'] == 1:
-                    loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)  # loss scaled by batch_size
+                    loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)
                 else:
-                    loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                    loss, loss_items = compute_loss(pred, targets.to(device))
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -464,26 +465,78 @@ def train(hyp, opt, device, tb_writer=None):
             final_epoch = epoch + 1 == epochs
             if not opt.notest or final_epoch:  # Calculate mAP
                 wandb_logger.current_epoch = epoch + 1
-                results, maps, times = test.test(data_dict,
-                                                batch_size=batch_size * 2,
-                                                imgsz=imgsz_test,
-                                                model=ema.ema,
-                                                single_cls=opt.single_cls,
-                                                dataloader=testloader,
-                                                save_dir=save_dir,
-                                                verbose=nc < 50 and final_epoch,
-                                                plots=plots and final_epoch,
-                                                wandb_logger=wandb_logger,
-                                                compute_loss=compute_loss,
-                                                is_coco=is_coco,
-                                                v5_metric=opt.v5_metric)
-                # Early stopping
+                
+                # Inicializar resultados
+                train_results = [0, 0, 0, 0]  # Inicializar con valores por defecto
+                results = [0, 0, 0, 0]  # Inicializar con valores por defecto
+
+                # Evaluar en conjunto de train
+                logger.info("\nEvaluating on training set:")
+                try:
+                    # Crear un dataloader específico para evaluación en train sin augmentaciones
+                    train_eval_loader = create_dataloader(train_path, imgsz_test, batch_size//2, gs, opt,
+                                                        hyp=hyp, augment=False, cache=False, rect=True, rank=-1,
+                                                        world_size=opt.world_size, workers=opt.workers,
+                                                        pad=0.5, prefix=colorstr('train eval: '))[0]
+                                                        
+                    train_results, _, _ = test.test(data_dict,
+                                              batch_size=batch_size // 2,  
+                                              imgsz=imgsz_test,
+                                              model=ema.ema,
+                                              single_cls=opt.single_cls,
+                                              dataloader=train_eval_loader,
+                                              save_dir=save_dir,
+                                              plots=plots and final_epoch,
+                                              wandb_logger=wandb_logger,
+                                              compute_loss=compute_loss,
+                                              is_coco=is_coco,
+                                              v5_metric=opt.v5_metric,
+                                              conf_thres=opt.conf_thres,
+                                              iou_thres=opt.iou_thres)
+                except Exception as e:
+                    logger.warning(f"Error en la evaluación del conjunto de entrenamiento: {str(e)}")
+                    train_results = [0, 0, 0, 0]
+
+                # Evaluar en conjunto de validación  
+                logger.info("\nEvaluating on validation set:")
+                try:
+                    results, maps, times = test.test(data_dict,
+                                               batch_size=batch_size * 2,
+                                               imgsz=imgsz_test,
+                                               model=ema.ema, 
+                                               single_cls=opt.single_cls,
+                                               dataloader=testloader,
+                                               save_dir=save_dir,
+                                               plots=plots and final_epoch,
+                                               wandb_logger=wandb_logger,
+                                               compute_loss=compute_loss,
+                                               is_coco=is_coco,
+                                               v5_metric=opt.v5_metric,
+                                               conf_thres=opt.conf_thres,
+                                               iou_thres=opt.iou_thres)
+                except Exception as e:
+                    logger.warning(f"Error en la evaluación del conjunto de validación: {str(e)}")
+                    results = [0, 0, 0, 0]
+                    maps = None
+                    times = None
+
+                if results is None:
+                    results = [0, 0, 0, 0]
+
+                # Early stopping usando métricas de validación
                 print(results)
-                early_stopping(results[2], model, epoch)  # Use mAP@.5 as the metric for early stopping
+                early_stopping(results[2], model, epoch)
 
                 if early_stopping.early_stop:
-                    print("Early stopping")
+                    print("Early stopping triggered")
                     break
+
+                # Mostrar métricas de cada época
+                metrics_msg = (f'\nEpoch {epoch}/{epochs - 1}:'
+                             f'\n * Training Metrics - Precision: {train_results[0]:.3f}, Recall: {train_results[1]:.3f}, mAP@0.5: {train_results[2]:.3f}, mAP@0.5:0.95: {train_results[3]:.3f}, Loss: {train_results[4]:.3f}'
+                             f'\n * Validation Metrics - Precision: {results[0]:.3f}, Recall: {results[1]:.3f}, mAP@0.5: {results[2]:.3f}, mAP@0.5:0.95: {results[3]:.3f}, Loss: {results[4]:.3f}'
+                             f'\n * Learning Rate - lr0: {lr[0]}, lr1: {lr[1]}, lr2: {lr[2]}')
+                logger.info(metrics_msg)
 
             # Write
             with open(results_file, 'a') as f:
@@ -501,14 +554,17 @@ def train(hyp, opt, device, tb_writer=None):
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb_logger.wandb:
                     wandb_logger.log({tag: x})  # W&B
-
+            '''
             # Mostrar métricas de cada época
             metrics_msg = (f'\nEpoch {epoch}/{epochs - 1}:'
-                          f'\n * Loss - Box: {mloss[0]:.3f}, Obj: {mloss[1]:.3f}, Cls: {mloss[2]:.3f}, Total: {mloss[3]:.3f}'
-                          f'\n * Metrics - Precision: {results[0]:.3f}, Recall: {results[1]:.3f}, mAP@0.5: {results[2]:.3f}, mAP@0.5:0.95: {results[3]:.3f}'
+                          f'\n * Training Loss - Box: {mloss[0]:.3f}, Obj: {mloss[1]:.3f}, Cls: {mloss[2]:.3f}, Total: {mloss[3]:.3f}'
+                          f'\n * Training Metrics - Precision: {train_results[0]:.3f}, Recall: {train_results[1]:.3f}, mAP@0.5: {train_results[2]:.3f}, mAP@0.5:0.95: {train_results[3]:.3f}'
+                          f'\n * Validation Metrics - Precision: {results[0]:.3f}, Recall: {results[1]:.3f}, mAP@0.5: {results[2]:.3f}, mAP@0.5:0.95: {results[3]:.3f}'
+                          f'\n * Training Loss - {train_results[4]:.3f}'
+                          f'\n * Validation Loss - {results[4]:.3f}'
                           f'\n * Learning Rate - lr0: {lr[0]}, lr1: {lr[1]}, lr2: {lr[2]}')
             logger.info(metrics_msg)
-
+            '''
             # Update best mAP
             fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
             if fi > best_fitness:
@@ -561,8 +617,8 @@ def train(hyp, opt, device, tb_writer=None):
                 results, _, _ = test.test(opt.data,
                                           batch_size=batch_size * 2,
                                           imgsz=imgsz_test,
-                                          conf_thres=0.001,
-                                          iou_thres=0.7,
+                                          conf_thres=0.10,
+                                          iou_thres=0.5,
                                           model=attempt_load(m, device).half(),
                                           single_cls=opt.single_cls,
                                           dataloader=testloader,
@@ -598,7 +654,7 @@ if __name__ == '__main__':
     parser.add_argument('--hyp', type=str, default='data/hyp.scratch.p5.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=300)
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
-    parser.add_argument('--img-size', nargs='+', type=int, default=[640, 640], help='[train, test] image sizes')
+    parser.add_argument('--img-size', nargs='+', type=int, default=[1024, 1024], help='[train, test] image sizes')
     parser.add_argument('--patience', type=int, default=10, help='patience for early stopping')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
@@ -629,9 +685,15 @@ if __name__ == '__main__':
     parser.add_argument('--artifact_alias', type=str, default="latest", help='version of dataset artifact to be used')
     parser.add_argument('--freeze', nargs='+', type=int, default=[0], help='Freeze layers: backbone of yolov7=50, first3=0 1 2')
     parser.add_argument('--v5-metric', action='store_true', help='assume maximum recall as 1.0 in AP calculation')
+    parser.add_argument('--conf-thres', type=float, default=0.10, help='object confidence threshold')
+    parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
+    
+    # Añadir el argumento task
+    parser.add_argument('--task', default='val', help='task to evaluate on: train, val or test')
+    
     opt = parser.parse_args()
 
-    # Set DDP variables
+    # Set DDP varibles
     opt.world_size = int(os.environ['WORLD_SIZE']) if 'WORLD_SIZE' in os.environ else 1
     opt.global_rank = int(os.environ['RANK']) if 'RANK' in os.environ else -1
     set_logging(opt.global_rank)

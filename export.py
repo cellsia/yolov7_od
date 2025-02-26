@@ -120,6 +120,11 @@ if __name__ == '__main__':
         print('\nStarting ONNX export with onnx %s...' % onnx.__version__)
         f = opt.weights.replace('.pt', '.onnx')  # filename
         model.eval()
+
+        # Get number of classes from model
+        num_classes = model.nc  # number of classes
+        print(f'Number of classes in model: {num_classes}')
+
         output_names = ['classes', 'boxes'] if y is None else ['output']
         dynamic_axes = None
         if opt.dynamic:
@@ -171,12 +176,15 @@ if __name__ == '__main__':
 
         # print(onnx.helper.printable_graph(onnx_model.graph))  # print a human readable model
 
-        # # Metadata
-        # d = {'stride': int(max(model.stride))}
-        # for k, v in d.items():
-        #     meta = onnx_model.metadata_props.add()
-        #     meta.key, meta.value = k, str(v)
-        # onnx.save(onnx_model, f)
+        # Add metadata including number of classes
+        metadata = {
+            'stride': int(max(model.stride)),
+            'nc': num_classes,  # add number of classes to metadata
+            'names': labels  # add class names to metadata
+        }
+        for k, v in metadata.items():
+            meta = onnx_model.metadata_props.add()
+            meta.key, meta.value = k, str(v)
 
         if opt.simplify:
             try:
@@ -191,6 +199,7 @@ if __name__ == '__main__':
         # print(onnx.helper.printable_graph(onnx_model.graph))  # print a human readable model
         onnx.save(onnx_model,f)
         print('ONNX export success, saved as %s' % f)
+        print(f'Model metadata: Number of classes={num_classes}, Names={labels}')
 
         if opt.include_nms:
             print('Registering NMS plugin for ONNX...')

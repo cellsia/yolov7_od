@@ -75,7 +75,9 @@ def create_legend(class_colors):
 
 
 
-def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class_names, class_colors, max_examples, metrics_classes, dataset_stats, confidence_ranges, image_examples=None):
+def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class_names, image_examples, 
+                               class_colors, metrics_classes, dataset_stats, confidence_ranges, 
+                               max_examples=20, conf_thres=None, iou_thres=None):
     doc = SimpleDocTemplate(pdf_path, pagesize=letter)
     elements = []
     styles = getSampleStyleSheet()
@@ -104,7 +106,18 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
     elements.append(Spacer(1, 5))
     elements.append(Paragraph(f"Number of images: <b>{str(dataset_stats['total_images'])}</b>", styles['Normal']))
     elements.append(Spacer(1, 5))
-   
+    elements.append(Paragraph(f"Total processed: <b>{str(dataset_stats['processed_images'])}</b>", styles['Normal']))  # Nueva línea
+    elements.append(Spacer(1, 5))
+    elements.append(Paragraph(f"Total real detections: <b>{str(dataset_stats['total_labels'])}</b>", styles['Normal']))  # Nueva línea
+    elements.append(Spacer(1, 5))
+    elements.append(Paragraph(f"Total predicted detections: <b>{str(dataset_stats['total_predictions'])}</b>", styles['Normal']))  # Nueva línea
+    if conf_thres is not None:
+        elements.append(Spacer(1, 5))
+        elements.append(Paragraph(f"Confidence Threshold: <b>{conf_thres:.2f}</b>", styles['Normal']))
+        elements.append(Spacer(1, 5))
+    if iou_thres is not None:
+        elements.append(Paragraph(f"IoU Threshold: <b>{iou_thres:.2f}</b>", styles['Normal']))
+    elements.append(Spacer(1, 20))
 
     # Crear tabla de métricas
     metrics_data = [["Precision", "Recall", "mAP@0.5", "mAP@0.5:0.95", "Class"]]
@@ -118,6 +131,9 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
 
     # Añadir métricas por clase desde class_metrics
     for cls_name, cls_metrics in metrics_classes.items():
+        # Saltar la métrica 'all' ya que ya tenemos Global
+        if cls_name == 'all':
+            continue
         metrics_data.append([
             f"{cls_metrics['precision']:.3f}",
             f"{cls_metrics['recall']:.3f}",

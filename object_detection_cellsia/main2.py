@@ -1,4 +1,3 @@
-
 import subprocess
 import argparse
 import sys
@@ -25,25 +24,28 @@ def clean_old_experiments(output_dir, latest_experiment):
             shutil.rmtree(experiment)
 
 def run_inference(model_type, weights, input_dir, output_dir, img_size, conf_thres, iou_thres, datasets):
-    script = "/app/yolov7/object_detection_cellsia/inference_onnx.py" if model_type == "onnx" else "/app/yolov7/object_detection_cellsia/inference.py"
+    # Change the script paths to use test files instead of inference files
+    script = "/app/yolov7/test_onnx.py" if model_type == "onnx" else "/app/yolov7/test_pt.py"
     
     for dataset in datasets:
         cmd = [
             "python", script,
-            "--input_dir", str(input_dir),
-            "--img_size", str(img_size),
-            "--conf_thres", str(conf_thres),
-            "--iou_thres", str(iou_thres),
+            "--data", str(input_dir / "data" / "data.yaml"),  # Use data.yaml path
+            "--img-size", str(img_size),
+            "--conf-thres", str(conf_thres),
+            "--iou-thres", str(iou_thres),
             "--weights", str(weights),
-            "--output_dir", str(output_dir),
-            "--key", dataset
+            "--output-dir", str(output_dir),  # Changed from output_dir to --output-dir
+            "--task", dataset,  # Changed from key to task
+            "--save-images",  # Add these flags to ensure images are saved
+            "--save-report"
         ]
         
         try:
             subprocess.run(cmd, check=True)
-            print(f"\nInferencia en {dataset} completada con éxito.")
+            print(f"\nInference on {dataset} completed successfully.")
         except subprocess.CalledProcessError as e:
-            print(f"Error durante la inferencia en {dataset}: {e}")
+            print(f"Error during inference on {dataset}: {e}")
             sys.exit(1)
 
 def main():
@@ -54,7 +56,7 @@ def main():
     parser.add_argument('--img_size', type=int, default=1024, help="Tamaño de imágenes.")
     parser.add_argument('--batch', type=int, default=16, help="Tamaño del batch.")
     parser.add_argument('--early_stopping_patience', type=int, default=50, help="Paciencia para early stopping.")
-    parser.add_argument('--conf_thres', type=float, default=0.25, help="Umbral de confianza.")
+    parser.add_argument('--conf_thres', type=float, default=0.10, help="Umbral de confianza.")
     parser.add_argument('--iou_thres', type=float, default=0.5, help="Umbral de IoU.")
     parser.add_argument('--run_train', action='store_true', help="Ejecutar inferencia en el conjunto train.")
     parser.add_argument('--run_test', action='store_true', help="Ejecutar inferencia en el conjunto test.")
@@ -77,7 +79,9 @@ def main():
         "python", "/app/yolov7/object_detection_cellsia/run_od_2.py",
         str(input_dir), "--output_dir", str(output_dir),
         "--epochs", str(args.epochs), "--img_size", str(args.img_size),
-        "--batch", str(args.batch), "--early_stopping_patience", str(args.early_stopping_patience)
+        "--batch", str(args.batch), "--early_stopping_patience", str(args.early_stopping_patience),
+        "--conf_thres", str(args.conf_thres),
+        "--iou_thres", str(args.iou_thres)
     ]
     
     try:
