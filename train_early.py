@@ -64,7 +64,7 @@ class EarlyStopping:
         elif score < self.best_score + self.delta:
             self.counter += 1
             if self.verbose:
-                print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+                logger.info(f'EarlyStopping counter: {self.counter} out of {self.patience}')
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
@@ -75,7 +75,7 @@ class EarlyStopping:
     def save_checkpoint(self, metric, model):
         '''Saves model when validation metric increases.'''
         if self.verbose:
-            print(f'Validation metric increased ({self.metric_max:.6f} --> {metric:.6f}).  Saving model ...')
+            logger.info(f'Validation metric increased ({self.metric_max:.6f} --> {metric:.6f}).  Saving model ...')
         self.metric_max = metric
         # Save the model (you can customize the path)
         save = self.save_dir / 'weights' / 'checkpoint.pt'
@@ -148,7 +148,7 @@ def train(hyp, opt, device, tb_writer=None):
     for k, v in model.named_parameters():
         v.requires_grad = True  # train all layers
         if any(x in k for x in freeze):
-            print('freezing %s' % k)
+            logger.info('freezing %s' % k)
             v.requires_grad = False
 
     # Optimizer
@@ -524,11 +524,10 @@ def train(hyp, opt, device, tb_writer=None):
                     results = [0, 0, 0, 0]
 
                 # Early stopping usando métricas de validación
-                print(results)
                 early_stopping(results[2], model, epoch)
 
                 if early_stopping.early_stop:
-                    print("Early stopping triggered")
+                    logger.info("Early stopping triggered")
                     break
 
                 # Mostrar métricas de cada época
@@ -830,5 +829,5 @@ if __name__ == '__main__':
 
         # Plot results
         plot_evolution(yaml_file)
-        print(f'Hyperparameter evolution complete. Best results saved as: {yaml_file}\n'
+        logger.info(f'Hyperparameter evolution complete. Best results saved as: {yaml_file}\n'
               f'Command to train a new model with these hyperparameters: $ python train.py --hyp {yaml_file}')
