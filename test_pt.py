@@ -13,14 +13,13 @@ from models.experimental import attempt_load
 from utils.datasets import create_dataloader, LoadStreams, LoadImages
 from utils.general import coco80_to_coco91_class, check_dataset, check_file, check_img_size, check_requirements, \
     box_iou, non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, increment_path, colorstr
-from utils.metrics import ap_per_class, ConfusionMatrix
+from utils.metrics_edit import ap_per_class, ConfusionMatrix
 from utils.plots import plot_images, output_to_target, plot_study_txt, plot_one_box
 from utils.torch_utils import select_device, time_synchronized, TracedModel
 from object_detection_cellsia.report import generate_pdf_with_front_page
 import cv2
 from numpy import random
 import logging
-
 
 class Opt:
     def __init__(self, key):
@@ -79,27 +78,37 @@ def plot_striped_box(img, xyxy, color1, color2, conf=None, line_thickness=2, str
 
 def get_random_color(used_colors):
     """
-    Genera un color aleatorio que no esté en la lista de usados, evitando rojos, rosas, morados y verdes
+    Genera un color aleatorio que no esté en la lista de usados, evitando colores específicos
     """
     def is_forbidden_color(color):
         r, g, b = color
         
-        # Detectar rojos (R alto, G y B bajos)
-        is_red = r > 150 and max(g, b) < 100
+        # Detectar grises (diferencia entre canales menor a 50)
+        is_grey = abs(r - g) < 50 and abs(g - b) < 50 and abs(r - b) < 50
         
-        # Detectar rosas (R y B altos, G bajo)
-        is_pink = r > 150 and b > 100 and g < 120
+        # Detectar rosas (R alto, B medio-alto)
+        is_pink = r > 180 and b > 100 and g < 180
         
-        # Detectar morados (R y B altos, pero R menor que en rosa)
-        is_purple = r > 100 and b > 150 and g < 120
+        # Detectar color carne (R alto, G medio-alto, B bajo-medio)
+        is_skin = r > 200 and 120 < g < 190 and 80 < b < 150
         
-        # Detectar grises (diferencia entre canales menor a 30)
-        is_grey = abs(r - g) < 30 and abs(g - b) < 30 and abs(r - b) < 30
+        # Detectar morados (R y B altos, G bajo)
+        is_purple = r > 80 and b > 80 and g < min(r, b)
         
-        # Detectar verdes (G alto, R y B bajos)
-        is_green = g > max(r, b) + 30
+        # Detectar verdes (G dominante)
+        is_green = g > max(r, b)
+        
+        # Detectar rojos (R dominante)
+        is_red = r > max(g, b) + 30
+        
+        # Detectar colores muy claros (todos los canales altos)
+        is_too_light = min(r, g, b) > 200
+        
+        # Detectar colores muy oscuros (todos los canales bajos)
+        is_too_dark = max(r, g, b) < 50
 
-        return is_red or is_pink or is_purple or is_grey or is_green
+        return (is_grey or is_pink or is_skin or is_purple or 
+                is_green or is_red or is_too_light or is_too_dark)
 
     while True:
         color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
@@ -167,6 +176,7 @@ def test(data,
     global opt
     opt = Opt(key)
     opt.device = device if 'device' in locals() else ''
+    model_name = str(data).split('/')[2]
 
     # Initialize/load model and set device
     training = model is not None
@@ -289,6 +299,7 @@ def test(data,
             targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
             lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
             t = time_synchronized()
+            print(iou_thres)
             out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
             t1 += time_synchronized() - t
 
@@ -334,6 +345,7 @@ def test(data,
                 scale_coords(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])
                 
                 # Para cada ground truth, buscar si tiene solapamiento con alguna predicción
+                print(len(tbox))
                 for i in range(len(tbox)):
                     box = tbox[i]
                     try:
@@ -393,8 +405,6 @@ def test(data,
                     else:
                         plot_one_box(xyxy, im0s, color=bgr_color, line_thickness=2)
 
-            # ... rest of the code ...
-
             # Predictions
             predn = pred.clone()
             scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # native-space pred
@@ -453,7 +463,6 @@ def test(data,
                     if pi.shape[0]:
                         # Prediction to target ious
                         ious, i = box_iou(predn[pi, :4], tbox[ti]).max(1)  # best ious, indices
-
                         # Append detections
                         detected_set = set()
                         for j in (ious > iouv[0]).nonzero(as_tuple=False):
@@ -490,8 +499,10 @@ def test(data,
                         
                         # Calcular IoU con cada caja ground truth
                         box_gt = box_iou(xyxy_tensor, tbox)
+                        print(box_gt)
                         max_iou, _ = box_gt.max(1)
                         is_correct = max_iou > iou_thres
+                        print(is_correct)
 
                     # Dibujar caja según corrección
                     bgr_color = (colors[cls][2], colors[cls][1], colors[cls][0])
@@ -520,6 +531,8 @@ def test(data,
                     # Almacenar ejemplo para reporte
                     expected_classes = {int(l): len(labels[labels[:, 0] == l]) for l in labels[:, 0].unique()} if nl else {}
                     detected_classes = {int(cls): len(pred[pred[:, 5] == cls]) for cls in pred[:, 5].unique()}
+                    
+                    # Solo agregar si aún no hemos alcanzado el límite
                     image_examples.append((str(save_path), expected_classes, detected_classes))
 
         # Plot images
@@ -532,9 +545,23 @@ def test(data,
     # Compute statistics
     stats = [np.concatenate(x, 0) for x in zip(*stats)]  # to numpy
     if len(stats) and stats[0].any():
-        p, r, ap, f1, ap_class = ap_per_class(*stats, plot=plots, v5_metric=v5_metric, save_dir=save_dir, names=names)
+        p, r, ap, f1, ap_class, precision_raw, recall_raw = ap_per_class(*stats, plot=plots, v5_metric=v5_metric, save_dir=save_dir, names=names)
+        print(p, r, ap, f1, ap_class, precision_raw, recall_raw)
+        
+        # Calcular medias de precision y recall sin interpolar
+        if isinstance(precision_raw[0], np.ndarray):
+            # Si precision_raw contiene arrays
+            mp = np.mean([p[-1] if len(p) > 0 else 0 for p in precision_raw])
+            mr = np.mean([r[-1] if len(r) > 0 else 0 for r in recall_raw])
+        else:
+            # Si precision_raw contiene escalares
+            mp = np.mean(precision_raw)
+            mr = np.mean(recall_raw)
+        
         ap50, ap = ap[:, 0], ap.mean(1)  # AP@0.5, AP@0.5:0.95
-        mp, mr, map50, map = p.mean(), r.mean(), ap50.mean(), ap.mean()
+        map50, map = ap50.mean(), ap.mean()
+        
+        print(mp, mr, map50, map)
         nt = np.bincount(stats[3].astype(np.int64), minlength=nc)  # number of targets per class
     else:
         nt = torch.zeros(1)
@@ -615,14 +642,6 @@ def test(data,
     if output_dir:
         out = Path(output_dir) / f"{key}_pt_report.pdf"
         
-        # Obtener el nombre del modelo
-        if isinstance(data, str):
-            model_name = Path(data).stem
-        else:
-            if isinstance(weights, list):
-                model_name = Path(weights[0]).stem
-            else:
-                model_name = Path(weights).stem if weights else "unknown"
 
         # Convertir metrics de tuple a dict        
         metrics_dict = {
@@ -672,10 +691,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='test.py')
     parser.add_argument('--weights', nargs='+', type=str, default='yolov7.pt', help='model.pt path(s)')
     parser.add_argument('--data', type=str, default='data/coco.yaml', help='*.data path')
-    parser.add_argument('--batch-size', type=int, default=32, help='size of each image batch')
-    parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
-    parser.add_argument('--conf-thres', type=float, default=0.10, help='object confidence threshold')
-    parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
+    parser.add_argument('--batch-size', type=int, default=8, help='size of each image batch')
+    parser.add_argument('--img-size', type=int, default=1024, help='inference size (pixels)')
+    parser.add_argument('--conf-thres', type=float, default=0.05, help='object confidence threshold')
+    parser.add_argument('--iou-thres', type=float, default=0.3, help='IOU threshold for NMS')
     parser.add_argument('--task', default='val', help='train, val, test, speed or study')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--single-cls', action='store_true', help='treat as single-class dataset')
@@ -688,7 +707,7 @@ if __name__ == '__main__':
     parser.add_argument('--project', default='runs/test', help='save to project/name')
     parser.add_argument('--name', default='exp', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
-    parser.add_argument('--no-trace', action='store_true', help='don`t trace model')
+    parser.add_argument('--no-trace', action='store_true', help='don`t trac_ model')
     parser.add_argument('--v5-metric', action='store_true', help='assume maximum recall as 1.0 in AP calculation')
     
     # Añadir nuevos argumentos para el guardado de imágenes y reporte
@@ -717,7 +736,7 @@ if __name__ == '__main__':
              save_txt=opt.save_txt | opt.save_hybrid,
              save_hybrid=opt.save_hybrid,
              save_conf=opt.save_conf,
-             trace=not opt.no_trace,
+             trace=False,
              v5_metric=opt.v5_metric,
              output_dir=opt.output_dir if (opt.save_images or opt.save_report) else None,
              key=opt.task

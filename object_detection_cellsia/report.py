@@ -104,20 +104,38 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
     elements.append(Spacer(1, 5))
     elements.append(Paragraph(f"Dataset: <b>{data_name}</b>", styles['Normal']))
     elements.append(Spacer(1, 5))
-    elements.append(Paragraph(f"Number of images: <b>{str(dataset_stats['total_images'])}</b>", styles['Normal']))
-    elements.append(Spacer(1, 5))
-    elements.append(Paragraph(f"Total processed: <b>{str(dataset_stats['processed_images'])}</b>", styles['Normal']))  # Nueva línea
-    elements.append(Spacer(1, 5))
-    elements.append(Paragraph(f"Total real detections: <b>{str(dataset_stats['total_labels'])}</b>", styles['Normal']))  # Nueva línea
-    elements.append(Spacer(1, 5))
-    elements.append(Paragraph(f"Total predicted detections: <b>{str(dataset_stats['total_predictions'])}</b>", styles['Normal']))  # Nueva línea
     if conf_thres is not None:
         elements.append(Spacer(1, 5))
         elements.append(Paragraph(f"Confidence Threshold: <b>{conf_thres:.2f}</b>", styles['Normal']))
         elements.append(Spacer(1, 5))
     if iou_thres is not None:
         elements.append(Paragraph(f"IoU Threshold: <b>{iou_thres:.2f}</b>", styles['Normal']))
+    elements.append(Spacer(1, 20)) 
+    
+    # Create 2x2 statistics table
+    stats_data = [
+        ["", "Real", "Processed"],
+        ["Images", str(dataset_stats['total_images']), str(dataset_stats['processed_images'])],
+        ["Labels", str(dataset_stats['total_labels']), str(dataset_stats['total_predictions'])]
+    ]
+    
+    stats_table = Table(stats_data, colWidths=[100, 100, 100])
+    stats_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), HexColor("#1b2a41")),
+        ('BACKGROUND', (0, 0), (0, -1), HexColor("#1b2a41")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('TEXTCOLOR', (0, 0), (0, -1), colors.whitesmoke),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
+    ]))
+    
+    elements.append(stats_table)
     elements.append(Spacer(1, 20))
+
+    
 
     # Crear tabla de métricas
     metrics_data = [["Precision", "Recall", "mAP@0.5", "mAP@0.5:0.95", "Class"]]
@@ -170,7 +188,7 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
             str(values['incorrect'])
         ])
 
-    confidence_table = Table(confidence_data, colWidths=[100, 100, 100])
+    confidence_table = Table(confidence_data, colWidths=[120, 120, 120])
     confidence_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), HexColor("#1b2a41")),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
@@ -179,8 +197,6 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
         ('GRID', (0, 0), (-1, -1), 1, colors.black),
     ]))
 
-    elements.append(Paragraph("Distribution of Wrong Predictions by Confidence", styles['Heading2']))
-    elements.append(Spacer(1, 10))
     elements.append(confidence_table)
     elements.append(Spacer(1, 20))
     

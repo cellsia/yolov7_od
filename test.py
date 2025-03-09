@@ -16,6 +16,7 @@ from utils.general import coco80_to_coco91_class, check_dataset, check_file, che
 from utils.metrics import ap_per_class, ConfusionMatrix
 from utils.plots import plot_images, output_to_target, plot_study_txt
 from utils.torch_utils import select_device, time_synchronized, TracedModel
+from object_detection_cellsia.generate_reports import generate_all_reports
 
 
 def test(data,
@@ -275,6 +276,61 @@ def test(data,
             map, map50 = eval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
         except Exception as e:
             print(f'pycocotools unable to run: {e}')
+
+    # Generate all reports
+    metrics_dict = {
+        'train': train_metrics,
+        'val': val_metrics,
+        'test': test_metrics
+    }
+
+    metrics_classes_dict = {
+        'train': train_metrics_classes,
+        'val': val_metrics_classes,
+        'test': test_metrics_classes
+    }
+
+    dataset_stats_dict = {
+        'train': {
+            'total_images': train_total_images,
+            'processed_images': train_processed_images,
+            'total_labels': train_total_labels,
+            'total_predictions': train_total_predictions
+        },
+        'val': {
+            'total_images': val_total_images,
+            'processed_images': val_processed_images,
+            'total_labels': val_total_labels,
+            'total_predictions': val_total_predictions
+        },
+        'test': {
+            'total_images': test_total_images,
+            'processed_images': test_processed_images,
+            'total_labels': test_total_labels,
+            'total_predictions': test_total_predictions
+        }
+    }
+
+    generate_all_reports(
+        model_name='YOLOv7',  # o el nombre de tu modelo
+        metrics_dict=metrics_dict,
+        class_names=class_names,
+        image_examples_dict={
+            'train': train_image_examples,
+            'val': val_image_examples,
+            'test': test_image_examples
+        },
+        class_colors=class_colors,
+        metrics_classes_dict=metrics_classes_dict,
+        dataset_stats_dict=dataset_stats_dict,
+        confidence_ranges_dict={
+            'train': train_confidence_ranges,
+            'val': val_confidence_ranges,
+            'test': test_confidence_ranges
+        },
+        conf_thres=conf_thres,
+        iou_thres=iou_thres
+    )
 
     # Return results
     model.float()  # for training

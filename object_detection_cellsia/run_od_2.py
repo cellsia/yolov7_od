@@ -108,18 +108,19 @@ def train_yolov7(data_config, output_dir, epochs, img_size, weights, batch, earl
             "--weights", str(weights),
             "--project", output_dir,
             "--name", "yolo_experiment",
-            "--hyp", "/data/hyp.scratch.custom.yaml",
+            "--hyp", "/data/hyp.scratch.p6.yaml",
             "--patience", str(early_stopping_patience),
             "--conf-thres", str(conf_thres),
-            "--iou-thres", str(iou_thres)
+            "--iou-thres", str(iou_thres),
+            "--adam"
         ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
 
         for line in process.stdout:
             line = line.strip()
             if line:
-                if any(keyword in line for keyword in ['Epoch', 'Loss', 'Metrics', 'Learning Rate']):
+                if any(keyword in line for keyword in ['Epoch', 'Loss', 'Metrics', 'Learning Rate', 'epoch', 'stopping', 'best', 'Best', 'early', 'Early']):
                     logger.info(line)
-                elif 'error' in line.lower():
+                if 'error' in line.lower():
                     logger.error(line)
                 elif 'warning' in line.lower():
                     logger.warning(line)

@@ -19,102 +19,8 @@ from utils.general import coco80_to_coco91_class, check_dataset, check_file, che
 from utils.metrics import ap_per_class, ConfusionMatrix
 from utils.plots import plot_images, output_to_target, plot_study_txt, plot_one_box  # Add plot_one_box here
 from utils.torch_utils import select_device, time_synchronized, TracedModel
-import onnxruntime
 
 
-class Opt:
-    def __init__(self, key):
-        self.device = ''  # 'cuda:0' o 'cpu'
-        self.project = 'runs/test'
-        self.name = 'exp'
-        self.exist_ok = False
-        self.task = key 
-        self.single_cls = False
-
-def plot_striped_box(img, xyxy, color1, color2, conf=None, line_thickness=2, stripe_length=15):
-    """
-    Dibuja una caja con rayas para detecciones incorrectas
-    """
-    try:
-        # Usar list comprehension en lugar de map
-        x1, y1, x2, y2 = [int(coord) for coord in xyxy]
-        
-        # Dibujar tres lados completos
-        cv2.line(img, (x1, y2), (x2, y2), color1, line_thickness)  # inferior
-        cv2.line(img, (x1, y1), (x1, y2), color1, line_thickness)  # izquierda
-        cv2.line(img, (x2, y1), (x2, y2), color1, line_thickness)  # derecha
-        
-        # Dibujar patrón rayado superior
-        total_width = x2 - x1
-        current_x = x1
-        is_red = True
-        
-        while current_x < x2:
-            end_x = min(current_x + stripe_length, x2)
-            color = color2 if is_red else color1
-            cv2.line(img, (current_x, y1), (end_x, y1), color, line_thickness)
-            current_x = end_x
-            is_red = not is_red
-        
-        if conf is not None:
-            conf_str = f"{conf:.2f}"
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.5
-            font_thickness = 2
-            
-            (text_width, text_height), baseline = cv2.getTextSize(conf_str, font, font_scale, font_thickness)
-            margin = 2
-            text_x = x1
-            text_y = y1 - margin
-            
-            cv2.rectangle(img, 
-                         (text_x, text_y - text_height - margin),
-                         (text_x + text_width + margin * 2, text_y + margin),
-                         color2, -1)
-            cv2.putText(img, conf_str, (text_x + margin, text_y - margin), 
-                        font, font_scale, (255, 255, 255), font_thickness)
-    except Exception as e:
-        logging.info(f"Error en plot_striped_box: {e}")
-
-
-def get_random_color(used_colors):
-    """
-    Genera un color aleatorio que no esté en la lista de usados, evitando colores específicos
-    """
-    def is_forbidden_color(color):
-        r, g, b = color
-        
-        # Detectar grises (diferencia entre canales menor a 50)
-        is_grey = abs(r - g) < 50 and abs(g - b) < 50 and abs(r - b) < 50
-        
-        # Detectar rosas (R alto, B medio-alto)
-        is_pink = r > 180 and b > 100 and g < 180
-        
-        # Detectar color carne (R alto, G medio-alto, B bajo-medio)
-        is_skin = r > 200 and 120 < g < 190 and 80 < b < 150
-        
-        # Detectar morados (R y B altos, G bajo)
-        is_purple = r > 80 and b > 80 and g < min(r, b)
-        
-        # Detectar verdes (G dominante)
-        is_green = g > max(r, b)
-        
-        # Detectar rojos (R dominante)
-        is_red = r > max(g, b) + 30
-        
-        # Detectar colores muy claros (todos los canales altos)
-        is_too_light = min(r, g, b) > 200
-        
-        # Detectar colores muy oscuros (todos los canales bajos)
-        is_too_dark = max(r, g, b) < 50
-
-        return (is_grey or is_pink or is_skin or is_purple or 
-                is_green or is_red or is_too_light or is_too_dark)
-
-    while True:
-        color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
-        if not is_forbidden_color(color) and color not in used_colors:
-            return color
 
 def calculate_iou(box1, box2):
     """
@@ -148,6 +54,7 @@ def calculate_iou(box1, box2):
     iou = intersection / float(box1_area + box2_area - intersection)
     return iou
 
+
 def test(data,
          weights=None,
          batch_size=32,
@@ -173,14 +80,9 @@ def test(data,
          v5_metric=False,
          output_dir=None,  # Añadir este parámetro
          key='test'):     # Añadir este parámetro
-    
-    global opt
-    opt = Opt(key)
-    opt.device = device if 'device' in locals() else ''
-    model_name = str(data).split('/')[2]
-
     # Initialize/load model and set device
     training = model is not None
+    model_name = str(data).split('/')[2]
     if training:  # called by train.py
         device = next(model.parameters()).device  # get model device
 
@@ -188,9 +90,17 @@ def test(data,
         set_logging()
         device = select_device(opt.device, batch_size=batch_size)
 
-        # Directories
-        save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
-        (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+        # Modificar cómo se establece el directorio de salida
+        if output_dir:
+            save_dir = Path(output_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
+        
+        (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)
+
+        # Load model
+        import onnxruntime
 
         # Modificar esta parte para manejar weights como lista
         if isinstance(weights, list):
@@ -198,17 +108,23 @@ def test(data,
         else:
             weight_path = weights
 
-        # Load model
-        session = onnxruntime.InferenceSession(weight_path, providers=["CUDAExecutionProvider" if device.type != "cpu" else "CPUExecutionProvider"])
-        
-        input_name = session.get_inputs()[0].name
+        # Ahora usar weight_path para la verificación
+        if weight_path.endswith(".onnx"):
+            session = onnxruntime.InferenceSession(weight_path, providers=["CUDAExecutionProvider" if device.type != "cpu" else "CPUExecutionProvider"])
+            logging.info(f"Input name: {session.get_inputs()[0].name}")
+            
+            input_name = session.get_inputs()[0].name
 
-        output_name = session.get_outputs()[0].name
+            output_name = session.get_outputs()[0].name
 
-        for inp in session.get_inputs():
-            expected_shape = inp.shape
-        model = session
-        is_onnx = True
+            for inp in session.get_inputs():
+                expected_shape = inp.shape
+            model = session
+            is_onnx = True
+        else:
+            logging.info(f"🔵 Cargando modelo PyTorch: {weight_path}")
+            model = attempt_load(weights, map_location=device)  # load FP32 model
+            is_onnx = False
 
         if not isinstance(model, onnxruntime.InferenceSession):  
             gs = max(int(model.stride.max()), 32)  # Valor predeterminado de stride para YOLOv7 en ONNX
@@ -216,9 +132,18 @@ def test(data,
             gs = 32    
         
         imgsz = check_img_size(imgsz, s=gs)  # check img_size
+        
+        if trace and not is_onnx:
+            model = TracedModel(model, device, imgsz)
     
-    half = False  # ONNX no usa half-precision
-    
+    if not isinstance(model, onnxruntime.InferenceSession):
+        half = device.type != 'cpu' and half_precision
+        if half:
+            model.half()
+        model.eval()
+    else:
+        half = False  # ONNX no usa half-precision
+
     if isinstance(data, str):
         is_coco = data.endswith('coco.yaml')
         with open(data) as f:
@@ -234,23 +159,17 @@ def test(data,
 
     check_dataset(data)  # check
     nc = 1 if single_cls else int(data['nc'])  # number of classes
-    iouv = torch.linspace(0.5, 0.95, 10).to(device)  # iou vector for mAP@0.5:0.95
-    niou = iouv.numel()  # Add this line to define niou
+    logging.info(f"Number of classes: {nc}")  # Debug print
 
-    # Initialize colors after loading model and classes
-    colors = {}
-    used_colors = set()
-    for i in range(nc):
-        color = get_random_color(used_colors)
-        colors[i] = color
-        used_colors.add(color)
-        
     # Logging
     log_imgs = 0
     if wandb_logger and wandb_logger.wandb:
         log_imgs = min(wandb_logger.log_imgs, 100)
     # Dataloader
     if not training:
+        if device.type != 'cpu':
+            if not isinstance(model, onnxruntime.InferenceSession):
+                model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
         task = opt.task if opt.task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
         logging.info(f"\n=== Dataloader Configuration ===")
         logging.info(f"Task: {task}")
@@ -272,9 +191,9 @@ def test(data,
             logging.info(f"Batch size: {batch_size}")
             logging.info(f"Image size: {imgsz}")
             
-            # # Print information about first batch
-            # batch = next(iter(dataloader))
-            # img, targets, paths, shapes = batch
+            # Print information about first batch
+            batch = next(iter(dataloader))
+            img, targets, paths, shapes = batch
         except Exception as e:
             logging.info(f"Error creating dataloader: {e}")
             raise
@@ -285,20 +204,18 @@ def test(data,
     seen = 0
     total_predictions = 0  # Nuevo contador para predicciones
     confusion_matrix = ConfusionMatrix(nc=nc)
-    names = {i: f"class_{i}" for i in range(nc)}  # Generar nombres de clases automáticamente
+    # Para PyTorch: usar model.names
+    if not isinstance(model, onnxruntime.InferenceSession):
+        names = {k: v for k, v in enumerate(model.names if hasattr(model, 'names') else model.module.names)}
+    # Para ONNX: definir nombres de clases genéricos
+    else:
+        names = {i: f"class_{i}" for i in range(nc)}  # Generar nombres de clases automáticamente
+
     coco91class = coco80_to_coco91_class()
     s = ('%20s' + '%12s' * 6) % ('Class', 'Images', 'Labels', 'P', 'R', 'mAP@.5', 'mAP@.5:.95')
     p, r, f1, mp, mr, map50, map, t0, t1 = 0., 0., 0., 0., 0., 0., 0., 0., 0.
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []
-
-    # Configurar directorios para imágenes procesadas y labels
-    if output_dir:
-        output_path = Path(output_dir) / "resultados" / "onnx" / key
-        processed_images_dir = output_path / "processed_images"
-        labels_dir = output_path / "labels"
-        processed_images_dir.mkdir(parents=True, exist_ok=True)
-        labels_dir.mkdir(parents=True, exist_ok=True)
 
     # Inicializar variables para el seguimiento de las detecciones
     image_examples = []
@@ -314,7 +231,27 @@ def test(data,
         '80-90': {'correct': 0, 'incorrect': 0},
         '90-100': {'correct': 0, 'incorrect': 0}
     }
-    
+
+    # Configurar directorios para imágenes procesadas y labels
+    if output_dir:
+        output_path = Path(output_dir) / "resultados" / "onnx" / key
+        processed_images_dir = output_path / "processed_images"
+        labels_dir = output_path / "labels"
+        processed_images_dir.mkdir(parents=True, exist_ok=True)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+
+    # Initialize colors after loading model and classes
+    colors = {}
+    used_colors = set()
+    for i in range(nc):
+        color = get_random_color(used_colors)
+        colors[i] = color
+        used_colors.add(color)
+
+    # After loading model and before processing predictions
+    iouv = torch.linspace(0.5, 0.95, 10).to(device)  # iou vector for mAP@0.5:0.95
+    niou = iouv.numel()  # Add this line to define niou
+
     for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
         img = img.to(device, non_blocking=True)
         if not isinstance(model, onnxruntime.InferenceSession):
@@ -346,9 +283,9 @@ def test(data,
                 resized_images.append(resized_img)
 
             # Convertir la lista de imágenes redimensionadas a un array NumPy con batch
-            img = np.array(resized_images)
+            img = np.array(img)
             img = img.transpose(0, 3, 1, 2)  # Transponer a (C, H, W) para ONNX
-
+           
             img = img.astype(np.float32) / 255.0
         targets = targets.to(device)
 
@@ -357,71 +294,142 @@ def test(data,
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            if isinstance(model, onnxruntime.InferenceSession):
-                print(f"\nONNX Input shape: {img.shape}")
-                input_name = model.get_inputs()[0].name
-                output_names = [output.name for output in model.get_outputs()]
-                print(f"Input name: {input_name}")
-                print(f"Output names: {output_names}")
-                
-                try:
-                    # Run inference
-                    ort_outs = model.run(output_names, {input_name: img})
-                    print(f"ONNX output length: {len(ort_outs)}")
-                    print(f"ONNX output shapes: {[o.shape for o in ort_outs]}")
-                    
-                    # Convert output to torch tensor
-                    out = torch.from_numpy(ort_outs[0]).to(device)
-                    print(f"Converted output shape: {out.shape}")
-                    train_out = None  # No training outputs in ONNX
-                except Exception as e:
-                    print(f"Error in ONNX inference: {e}")
-                    raise
+            if is_onnx:
+                preds = model.run([output_name], {input_name: img})[0]
+                out = torch.tensor(preds).to(device)  # Convertir a tensor para usar con el resto del código
+                train_out = None  # No se usa en ONNX
             else:
-                # PyTorch inference
-                out, train_out = model(img, augment=augment)
-            
+                out, train_out = model(img, augment=augment)  # inference and training outputs
+            # inference and training outputs
             t0 += time_synchronized() - t
 
-            # Compute loss (skip for ONNX)
-            if compute_loss and not isinstance(model, onnxruntime.InferenceSession):
-                loss += compute_loss([x.float() for x in train_out], targets)[1][:3]
-                # Run NMS
+            # Compute loss
+            if compute_loss:
+                loss += compute_loss([x.float() for x in train_out], targets)[1][:3]  # box, obj, cls
+
+            # Run NMS
             targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
             lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
             t = time_synchronized()
             if is_onnx:
-                out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
+                out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, multi_label=True)
             else:
                 out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
                 
             t1 += time_synchronized() - t
 
         # Contar predicciones totales
-            for det in out:
-                total_predictions += len(det)
+        for det in out:
+            total_predictions += len(det)
 
         # Dentro del bucle principal, después de procesar las predicciones
         for si, pred in enumerate(out):
+            labels = targets[targets[:, 0] == si, 1:]
+            nl = len(labels)
+            
+            if len(pred) > 0:
+                # Scale coordinates
+                predn = pred.clone()
+                scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])
 
-            im0s = cv2.imread(str(paths[si]))
-            if im0s is None:
-                logging.error(f"Error loading image: {paths[si]}")
-                continue
+                # Para cada predicción, verificar IoU con ground truth
+                for *xyxy, conf, cls in predn:
+                    cls = int(cls)
+                    is_correct = False
 
+                    if nl:
+                        # Convertir las coordenadas del ground truth
+                        tbox = xywh2xyxy(labels[:, 1:5])
+                        scale_coords(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])
+
+                        # Calcular IoU con todas las cajas ground truth de la misma clase
+                        target_cls = labels[:, 0].tolist()
+                        matching_targets = (cls == labels[:, 0]).nonzero(as_tuple=False).view(-1)
+                        
+                        if len(matching_targets) > 0:
+                            xyxy_tensor = torch.tensor(xyxy, device=device).unsqueeze(0)
+                            ious = box_iou(xyxy_tensor, tbox[matching_targets])
+                            max_iou = ious.max().item()
+                            is_correct = max_iou > iou_thres
+
+                    # Actualizar rangos de confianza
+                    conf_value = float(conf) * 100
+                    for range_key in total_confidence_ranges:
+                        min_val, max_val = [int(x) for x in range_key.split('-')]
+                        if min_val <= conf_value < max_val:
+                            if is_correct:
+                                total_confidence_ranges[range_key]['correct'] += 1
+                            else:
+                                total_confidence_ranges[range_key]['incorrect'] += 1
+                            break
+
+        # Statistics per image
+        for si, pred in enumerate(out):
             labels = targets[targets[:, 0] == si, 1:]
             nl = len(labels)
             tcls = labels[:, 0].tolist() if nl else []  # target class
             path = Path(paths[si])
             seen += 1
 
+            if len(pred) == 0:
+                if nl:
+                    stats.append((torch.zeros(0, niou, dtype=torch.bool), torch.Tensor(), torch.Tensor(), tcls))
+                continue
+
+            # Predictions
+            predn = pred.clone()
+            scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])
+
+            # Assign all predictions as incorrect
+            correct = torch.zeros(pred.shape[0], niou, dtype=torch.bool, device=device)
+            if nl:
+                detected = []  # target indices
+                tcls_tensor = labels[:, 0]
+
+                # target boxes
+                tbox = xywh2xyxy(labels[:, 1:5])
+                scale_coords(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])
+
+                # Per target class
+                for cls in torch.unique(tcls_tensor):
+                    ti = (cls == tcls_tensor).nonzero(as_tuple=False).view(-1)  # target indices
+                    pi = (cls == pred[:, 5]).nonzero(as_tuple=False).view(-1)  # prediction indices
+
+                    # Search for detections
+                    if pi.shape[0]:
+                        # Prediction to target ious
+                        ious, i = box_iou(predn[pi, :4], tbox[ti]).max(1)  # best ious, indices
+
+                        # Append detections
+                        detected_set = set()
+                        for j in (ious > iouv[0]).nonzero(as_tuple=False):
+                            d = ti[i[j]]  # detected target
+                            if d.item() not in detected_set:
+                                detected_set.add(d.item())
+                                detected.append(d)
+                                correct[pi[j]] = ious[j] > iouv  # iou_thres is 1xn
+                                if len(detected) == nl:  # all targets already located in image
+                                    break
+
+            # Append statistics (correct, conf, pcls, tcls)
+            stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))
+
+            # Cargar imagen original usando cv2 directamente
+            im0s = cv2.imread(str(paths[si]))
+            if im0s is None:
+                logging.info(f"Error loading image: {paths[si]}")
+                continue
+            
+            labels = targets[targets[:, 0] == si, 1:]
+            nl = len(labels)
+            tcls = labels[:, 0].tolist() if nl else []  # target class
+            path = Path(paths[si])
+
+            # PRIMERO: Procesar todas las predicciones y guardar sus áreas
             prediction_boxes = []
             if len(pred):
-                # Scale coordinates
                 predn = pred.clone()
                 scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])
-
-                # Para cada predicción, verificar IoU con ground truth
                 for *xyxy, conf, cls in predn:
                     try:
                         box = [int(x.item()) for x in xyxy]
@@ -431,9 +439,10 @@ def test(data,
                             'cls': cls
                         })
                     except Exception as e:
-                        logging.error(f"Error al procesar predicción: {e}")
+                        logging.info(f"Error al procesar predicción: {e}")
                         continue
 
+            # SEGUNDO: Procesar ground truth y marcar cuáles tienen solapamiento
             matched_gt = set()
             if nl:
                 tbox = xywh2xyxy(labels[:, 1:5])
@@ -452,11 +461,11 @@ def test(data,
                                 matched_gt.add(i)
                                 break
                         
-                        # Solo dibujar si NO hay solapamiento
+                        # Solo dibujar si NO hay solapamiento (ground truth no detectado)
                         if i not in matched_gt:
                             cv2.rectangle(im0s, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     except Exception as e:
-                        logging.error(f"Error al procesar ground truth: {e}")
+                        logging.info(f"Error al procesar ground truth: {e}")
                         continue
 
             # TERCERO: Procesar y dibujar predicciones
@@ -494,6 +503,7 @@ def test(data,
                         plot_striped_box(im0s, xyxy, bgr_color, (0,0,255), conf=conf)
                     else:
                         plot_one_box(xyxy, im0s, color=bgr_color, line_thickness=2)
+
                 # Guardar imagen procesada
                 if output_dir:
                     save_path = processed_images_dir / f"{Path(paths[si]).stem}_processed.jpg"
@@ -503,132 +513,6 @@ def test(data,
                     expected_classes = {int(l): len(labels[labels[:, 0] == l]) for l in labels[:, 0].unique()} if nl else {}
                     detected_classes = {int(cls): len(pred[pred[:, 5] == cls]) for cls in pred[:, 5].unique()}
                     image_examples.append((str(save_path), expected_classes, detected_classes))
-        # Predictions
-            predn = pred.clone()
-            scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # native-space pred
-
-            # Append to text file
-            if save_txt:
-                gn = torch.tensor(shapes[si][0])[[1, 0, 1, 0]]  # normalization gain whwh
-                for *xyxy, conf, cls in predn.tolist():
-                    xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                    line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
-                    with open(save_dir / 'labels' / (path.stem + '.txt'), 'a') as f:
-                        f.write(('%g ' * len(line)).rstrip() % line + '\n')
-
-            # W&B logging - Media Panel Plots
-            if len(wandb_images) < log_imgs and wandb_logger.current_epoch > 0:  # Check for test operation
-                if wandb_logger.current_epoch % wandb_logger.bbox_interval == 0:
-                    box_data = [{"position": {"minX": xyxy[0], "minY": xyxy[1], "maxX": xyxy[2], "maxY": xyxy[3]},
-                                 "class_id": int(cls),
-                                 "box_caption": "%s %.3f" % (names[cls], conf),
-                                 "scores": {"class_score": conf},
-                                 "domain": "pixel"} for *xyxy, conf, cls in pred.tolist()]
-                    boxes = {"predictions": {"box_data": box_data, "class_labels": names}}  # inference-space
-                    wandb_images.append(wandb_logger.wandb.Image(img[si], boxes=boxes, caption=path.name))
-            wandb_logger.log_training_progress(predn, path, names) if wandb_logger and wandb_logger.wandb_run else None
-
-            # Append to pycocotools JSON dictionary
-            if save_json:
-                # [{"image_id": 42, "category_id": 18, "bbox": [258.15, 41.29, 348.26, 243.78], "score": 0.236}, ...
-                image_id = int(path.stem) if path.stem.isnumeric() else path.stem
-                box = xyxy2xywh(predn[:, :4])  # xywh
-                box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
-                for p, b in zip(pred.tolist(), box.tolist()):
-                    jdict.append({'image_id': image_id,
-                                  'category_id': coco91class[int(p[5])] if is_coco else int(p[5]),
-                                  'bbox': [round(x, 3) for x in b],
-                                  'score': round(p[4], 5)})
-
-            # Assign all predictions as incorrect
-            correct = torch.zeros(pred.shape[0], niou, dtype=torch.bool, device=device)
-            if nl:
-                detected = []  # target indices
-                tcls_tensor = labels[:, 0]
-
-                # target boxes
-                tbox = xywh2xyxy(labels[:, 1:5])
-                scale_coords(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])  # native-space labels
-                if plots:
-                    confusion_matrix.process_batch(predn, torch.cat((labels[:, 0:1], tbox), 1))
-
-                # Per target class
-                for cls in torch.unique(tcls_tensor):
-                    ti = (cls == tcls_tensor).nonzero(as_tuple=False).view(-1)  # prediction indices
-                    pi = (cls == pred[:, 5]).nonzero(as_tuple=False).view(-1)  # target indices
-
-                    # Search for detections
-                    if pi.shape[0]:
-                        # Prediction to target ious
-                        ious, i = box_iou(predn[pi, :4], tbox[ti]).max(1)  # best ious, indices
-
-                        # Append detections
-                        detected_set = set()
-                        for j in (ious > iouv[0]).nonzero(as_tuple=False):
-                            d = ti[i[j]]  # detected target
-                            if d.item() not in detected_set:
-                                detected_set.add(d.item())
-                                detected.append(d)
-                                correct[pi[j]] = ious[j] > iouv  # iou_thres is 1xn
-                                if len(detected) == nl:  # all targets already located in image
-                                    break
-
-            # Append statistics (correct, conf, pcls, tcls)
-            stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))
-
-            # Process predictions
-            if len(pred):
-                predn = pred.clone()
-                scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])
-
-                # Process each detection
-                for *xyxy, conf, cls in predn:
-                    cls = int(cls)
-                    is_correct = False
-
-                    # Verificar si la detección coincide con ground truth
-                    if nl:
-                        # target boxes
-                        tbox = xywh2xyxy(labels[:, 1:5])
-                        scale_coords(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])
-                        
-                        # Asegurar que ambos tensores estén en el mismo dispositivo
-                        xyxy_tensor = torch.tensor(xyxy, device=device).unsqueeze(0)
-                        tbox = tbox.to(device)
-                        
-                        # Calcular IoU con cada caja ground truth
-                        box_gt = box_iou(xyxy_tensor, tbox)
-                        max_iou, _ = box_gt.max(1)
-                        is_correct = max_iou > iou_thres
-
-                    # Dibujar caja según corrección
-                    bgr_color = (colors[cls][2], colors[cls][1], colors[cls][0])
-                    if not is_correct:
-                        plot_striped_box(im0s, xyxy, bgr_color, (0,0,255), conf=conf)
-                    else:
-                        plot_one_box(xyxy, im0s, color=bgr_color, line_thickness=2)
-
-                    # Actualizar rangos de confianza
-                    conf_value = float(conf) * 100
-                    for range_key in total_confidence_ranges:
-                        # Usar split y list comprehension en lugar de map
-                        min_val, max_val = [int(x) for x in range_key.split('-')]
-                        if min_val <= conf_value < max_val:
-                            if is_correct:
-                                total_confidence_ranges[range_key]['correct'] += 1
-                            else:
-                                total_confidence_ranges[range_key]['incorrect'] += 1
-                            break
-
-                if output_dir:
-                    # Guardar imagen procesada
-                    save_path = processed_images_dir / f"{Path(paths[si]).stem}_processed.jpg"
-                    cv2.imwrite(str(save_path), im0s)
-                    
-                    # ELIMINAR ESTE BLOQUE DE CÓDIGO YA QUE ES DUPLICADO
-                    # expected_classes = {int(l): len(labels[labels[:, 0] == l]) for l in labels[:, 0].unique()} if nl else {}
-                    # detected_classes = {int(cls): len(pred[pred[:, 5] == cls]) for cls in pred[:, 5].unique()}
-                    # image_examples.append((str(save_path), expected_classes, detected_classes))
 
         # Plot images
         if plots and batch_i < 3:
@@ -637,6 +521,11 @@ def test(data,
             f = save_dir / f'test_batch{batch_i}_pred.jpg'  # predictions
             Thread(target=plot_images, args=(img, output_to_target(out), paths, f, names), daemon=True).start()
 
+    # Compute statistics
+    if len(stats) == 0:
+        logging.info("\nWARNING: No valid detections found. Check your dataset path and annotations.")
+        # Initialize empty metrics for report
+        stats = [[np.array([])], [np.array([])], [np.array([])], [np.array([])]]
 
     stats = [np.concatenate(x, 0) for x in zip(*stats)] if stats else []
 
@@ -762,7 +651,7 @@ def test(data,
         )
 
     # Return results
-  # for training
+    #model.float()  # for training
     if not training:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
         logging.info(f"Results saved to {save_dir}{s}")
@@ -771,34 +660,121 @@ def test(data,
         maps[c] = ap[i]
     return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t, class_metrics, dataset_stats
 
+
+def get_random_color(used_colors):
+    """
+    Genera un color aleatorio que no esté en la lista de usados, evitando colores específicos
+    """
+    def is_forbidden_color(color):
+        r, g, b = color
+        
+        # Detectar grises (diferencia entre canales menor a 50)
+        is_grey = abs(r - g) < 50 and abs(g - b) < 50 and abs(r - b) < 50
+        
+        # Detectar rosas (R alto, B medio-alto)
+        is_pink = r > 180 and b > 100 and g < 180
+        
+        # Detectar color carne (R alto, G medio-alto, B bajo-medio)
+        is_skin = r > 200 and 120 < g < 190 and 80 < b < 150
+        
+        # Detectar morados (R y B altos, G bajo)
+        is_purple = r > 80 and b > 80 and g < min(r, b)
+        
+        # Detectar verdes (G dominante)
+        is_green = g > max(r, b)
+        
+        # Detectar rojos (R dominante)
+        is_red = r > max(g, b) + 30
+        
+        # Detectar colores muy claros (todos los canales altos)
+        is_too_light = min(r, g, b) > 200
+        
+        # Detectar colores muy oscuros (todos los canales bajos)
+        is_too_dark = max(r, g, b) < 50
+
+        return (is_grey or is_pink or is_skin or is_purple or 
+                is_green or is_red or is_too_light or is_too_dark)
+
+    while True:
+        color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+        if not is_forbidden_color(color) and color not in used_colors:
+            return color
+
+
+def plot_striped_box(img, xyxy, color1, color2, conf=None, line_thickness=2, stripe_length=15):
+    """
+    Dibuja una caja con rayas para detecciones incorrectas
+    """
+    try:
+        # Usar list comprehension en lugar de map
+        x1, y1, x2, y2 = [int(coord) for coord in xyxy]
+        
+        # Dibujar tres lados completos
+        cv2.line(img, (x1, y2), (x2, y2), color1, line_thickness)  # inferior
+        cv2.line(img, (x1, y1), (x1, y2), color1, line_thickness)  # izquierda
+        cv2.line(img, (x2, y1), (x2, y2), color1, line_thickness)  # derecha
+        
+        # Dibujar patrón rayado superior
+        total_width = x2 - x1
+        current_x = x1
+        is_red = True
+        
+        while current_x < x2:
+            end_x = min(current_x + stripe_length, x2)
+            color = color2 if is_red else color1
+            cv2.line(img, (current_x, y1), (end_x, y1), color, line_thickness)
+            current_x = end_x
+            is_red = not is_red
+        
+        if conf is not None:
+            conf_str = f"{conf:.2f}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.5
+            font_thickness = 2
+            
+            (text_width, text_height), baseline = cv2.getTextSize(conf_str, font, font_scale, font_thickness)
+            margin = 2
+            text_x = x1
+            text_y = y1 - margin
+            
+            cv2.rectangle(img, 
+                         (text_x, text_y - text_height - margin),
+                         (text_x + text_width + margin * 2, text_y + margin),
+                         color2, -1)
+            cv2.putText(img, conf_str, (text_x + margin, text_y - margin), 
+                        font, font_scale, (255, 255, 255), font_thickness)
+    except Exception as e:
+        logging.info(f"Error en plot_striped_box: {e}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='test.py')
     parser.add_argument('--weights', nargs='+', type=str, default='yolov7.pt', help='model.pt path(s)')
     parser.add_argument('--data', type=str, default='data/coco.yaml', help='*.data path')
-    parser.add_argument('--batch-size', type=int, default=32, help='size of each image batch')
-    parser.add_argument('--img-size', type=int, default=1024, help='inference size (pixels)')
-    parser.add_argument('--conf-thres', type=float, default=0.25, help='object confidence threshold')
-    parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
+    parser.add_argument('--batch_size', type=int, default=32, help='size of each image batch')
+    parser.add_argument('--img_size', type=int, default=1024, help='inference size (pixels)')
+    parser.add_argument('--conf_thres', type=float, default=0.10, help='object confidence threshold')
+    parser.add_argument('--iou_thres', type=float, default=0.5, help='IOU threshold for NMS')
     parser.add_argument('--task', default='val', help='train, val, test, speed or study')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    parser.add_argument('--single-cls', action='store_true', help='treat as single-class dataset')
+    parser.add_argument('--single_cls', action='store_true', help='treat as single-class dataset')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')
-    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
-    parser.add_argument('--save-hybrid', action='store_true', help='save label+prediction hybrid results to *.txt')
-    parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
-    parser.add_argument('--save-json', action='store_true', help='save a cocoapi-compatible JSON results file')
+    parser.add_argument('--save_txt', action='store_true', help='save results to *.txt')
+    parser.add_argument('--save_hybrid', action='store_true', help='save label+prediction hybrid results to *.txt')
+    parser.add_argument('--save_conf', action='store_true', help='save confidences in --save-txt labels')
+    parser.add_argument('--save_json', action='store_true', help='save a cocoapi-compatible JSON results file')
     parser.add_argument('--project', default='runs/test', help='save to project/name')
     parser.add_argument('--name', default='exp', help='save to project/name')
-    parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
-    parser.add_argument('--no-trace', action='store_true', help='don`t trace model')
-    parser.add_argument('--v5-metric', action='store_true', help='assume maximum recall as 1.0 in AP calculation')
+    parser.add_argument('--exist_ok', action='store_true', help='existing project/name ok, do not increment')
+    parser.add_argument('--no_trace', action='store_true', help='don`t trace model')
+    parser.add_argument('--v5_metric', action='store_true', help='assume maximum recall as 1.0 in AP calculation')
     
     # Añadir nuevos argumentos para el guardado de imágenes y reporte
-    parser.add_argument('--output-dir', type=str, help='directorio para guardar resultados')
-    parser.add_argument('--save-images', action='store_true', help='guardar imágenes con detecciones')
-    parser.add_argument('--save-report', action='store_true', help='generar reporte PDF')
-    parser.add_argument('--max-examples', type=int, default=20, help='número máximo de ejemplos en el reporte')
+    parser.add_argument('--output_dir', type=str, help='directorio para guardar resultados')
+    parser.add_argument('--save_images', action='store_true', help='guardar imágenes con detecciones')
+    parser.add_argument('--save_report', action='store_true', help='generar reporte PDF')
+    parser.add_argument('--max_examples', type=int, default=20, help='número máximo de ejemplos en el reporte')
 
     opt = parser.parse_args()
     opt.save_json |= opt.data.endswith('coco.yaml')
@@ -806,16 +782,16 @@ if __name__ == '__main__':
     #check_requirements()
 
     if opt.task in ('train', 'val', 'test'):  # run normally
-        test(opt.data,
-             opt.weights,
-             opt.batch_size,
-             opt.img_size,
-             opt.conf_thres,
-             opt.iou_thres,
-             opt.save_json,
-             opt.single_cls,
-             opt.augment,
-             opt.verbose,
+        test(data=opt.data,
+             weights=opt.weights,
+             batch_size=opt.batch_size,
+             imgsz=opt.img_size,
+             conf_thres=opt.conf_thres,
+             iou_thres=opt.iou_thres,
+             save_json=opt.save_json,
+             single_cls=opt.single_cls,
+             augment=opt.augment,
+             verbose=opt.verbose,
              save_txt=opt.save_txt | opt.save_hybrid,
              save_hybrid=opt.save_hybrid,
              save_conf=opt.save_conf,
@@ -827,7 +803,7 @@ if __name__ == '__main__':
 
     elif opt.task == 'speed':  # speed benchmarks
         for w in opt.weights:
-            test(opt.data, w, opt.batch_size, opt.img_size, 0.25, 0.45, save_json=False, plots=False, v5_metric=opt.v5_metric)
+            test(opt.data, w, opt.batch_size, opt.img_size, opt.conf_thres, opt.iou_thres, save_json=False, plots=False, v5_metric=opt.v5_metric)
 
     elif opt.task == 'study':  # run over a range of settings and save/plot
         # python test.py --task study --data coco.yaml --iou 0.65 --weights yolov7.pt

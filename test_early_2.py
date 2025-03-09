@@ -21,9 +21,9 @@ from utils.torch_utils import select_device, time_synchronized, TracedModel
 def test(data,
          weights=None,
          batch_size=32,
-         imgsz=640,
-         conf_thres=0.10,
-         iou_thres=0.6,  # for NMS
+         imgsz=1024,
+         conf_thres=0.10,  # Updated default to match typical usage
+         iou_thres=0.5,    # Updated default to match typical usage
          save_json=False,
          single_cls=False,
          augment=False,
@@ -41,6 +41,11 @@ def test(data,
          trace=False,
          is_coco=False,
          v5_metric=False):
+    
+    # Log the thresholds being used
+    if verbose:
+        print(f"Using confidence threshold: {conf_thres}, IoU threshold: {iou_thres}")
+
     # Initialize/load model and set device
     training = model is not None
     if training:  # called by train.py
@@ -94,7 +99,6 @@ def test(data,
         print("Testing with YOLOv5 AP metric...")
     
     seen = 0
-    total_predictions = 0  # Nuevo contador para predicciones totales
     confusion_matrix = ConfusionMatrix(nc=nc)
     names = {k: v for k, v in enumerate(model.names if hasattr(model, 'names') else model.module.names)}
     coco91class = coco80_to_coco91_class()
@@ -125,10 +129,6 @@ def test(data,
             t = time_synchronized()
             out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
             t1 += time_synchronized() - t
-
-            # Contar predicciones totales
-            for det in out:
-                total_predictions += len(det)
 
         # Statistics per image
         for si, pred in enumerate(out):
@@ -226,43 +226,27 @@ def test(data,
     # Compute statistics
     stats = [np.concatenate(x, 0) for x in zip(*stats)]  # to numpy
     if len(stats) and stats[0].any():
-        p, r, ap, f1, ap_class = ap_per_class(*stats, plot=plots, v5_metric=v5_metric, save_dir=save_dir, names=names)
+        p, r, ap, f1, ap_class, raw_precision, raw_recall = ap_per_class(*stats, plot=plots, v5_metric=v5_metric, save_dir=save_dir, names=names)
         ap50, ap = ap[:, 0], ap.mean(1)  # AP@0.5, AP@0.5:0.95
         mp, mr, map50, map = p.mean(), r.mean(), ap50.mean(), ap.mean()
+        # Calcular promedios de raw precision y recall
+        mp_raw = np.mean(raw_precision) if raw_precision else 0
+        mr_raw = np.mean(raw_recall) if raw_recall else 0
         nt = np.bincount(stats[3].astype(np.int64), minlength=nc)  # number of targets per class
     else:
         nt = torch.zeros(1)
-
-    class_metrics = {}
+        mp_raw = mr_raw = 0
 
     # Print results
-    pf = '%20s' + '%12i' * 2 + '%12.3g' * 4  # print format
-    print(pf % ('all', seen, nt.sum(), mp, mr, map50, map))
+    pf = '%20s' + '%12i' * 2 + '%12.3g' * 6  # print format
+    print(pf % ('all', seen, nt.sum(), mp, mr, map50, map, mp_raw, mr_raw))
 
     # Print results per class
     if (verbose or (nc < 50 and not training)) and nc > 1 and len(stats):
         for i, c in enumerate(ap_class):
-            print(pf % (names[c], seen, nt[c], p[i], r[i], ap50[i], ap[i]))
-
-                # Guardar métricas en el diccionario
-            class_metrics[names[c]] = {
-                "precision": p[i],
-                "recall": r[i],
-                "map@0.5": ap50[i],
-                "map@0.5:0.95": ap[i],
-                "class_name": names[c],
-            }
-
-    # Añadir contadores de imágenes y predicciones
-    total_images = len(dataloader.dataset)
-    total_processed = seen
-
-    dataset_stats = {
-        'total_images': total_images,
-        'processed_images': total_processed,
-        'total_labels': int(nt.sum()),
-        'total_predictions': total_predictions
-    }
+            print(pf % (names[c], seen, nt[c], p[i], r[i], ap50[i], ap[i], 
+                       raw_precision[i] if raw_precision else 0, 
+                       raw_recall[i] if raw_recall else 0))
 
     # Print speeds
     t = tuple(x / seen * 1E3 for x in (t0, t1, t0 + t1)) + (imgsz, imgsz, batch_size)  # tuple
@@ -311,7 +295,10 @@ def test(data,
     maps = np.zeros(nc) + map
     for i, c in enumerate(ap_class):
         maps[c] = ap[i]
-    return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t, class_metrics, dataset_stats
+    
+    val_loss = sum((loss.cpu() / len(dataloader)).tolist())  # Sumar los componentes de la pérdida y convertir a escalar
+    
+    return (mp, mr, map50, map, val_loss, mp_raw, mr_raw), maps, t
 
 
 if __name__ == '__main__':
@@ -320,7 +307,7 @@ if __name__ == '__main__':
     parser.add_argument('--data', type=str, default='data/coco.yaml', help='*.data path')
     parser.add_argument('--batch-size', type=int, default=32, help='size of each image batch')
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
-    parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
+    parser.add_argument('--conf-thres', type=float, default=0.25, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.65, help='IOU threshold for NMS')
     parser.add_argument('--task', default='val', help='train, val, test, speed or study')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
