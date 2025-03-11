@@ -30,27 +30,39 @@ def create_signature_box():
     table.setStyle(table_style)
     return table
 
+from reportlab.lib.colors import HexColor
+
+def rgb_to_hex(color):
+    """Convierte un color RGB en formato (R, G, B) a un string hexadecimal '#RRGGBB'."""
+    return HexColor('#{:02x}{:02x}{:02x}'.format(*color))
+
 def create_legend(class_colors):
     """
-    Crea una leyenda horizontal con recuadros de colores y nombres de clase.
+    Crea una leyenda horizontal con recuadros de colores y nombres de clase sin normalizar.
     """
     legend_data = []
     current_row = []
 
     for idx, (cls, color) in enumerate(class_colors.items()):
+        try:
+            hex_color = rgb_to_hex(color)  # Convertir RGB a HEX
+        except Exception as e:
+            print(f"Error con el color de la clase {cls}: {color} - {e}")
+            hex_color = HexColor("#000000")  # Color negro por defecto en caso de error
+
         # Crear el recuadro de color
         color_box = Table(
             [[" "]],  # Espacio vacío dentro del recuadro
             colWidths=10, rowHeights=10
         )
         color_box.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), colors.Color(*[c / 255 for c in color])),
+            ('BACKGROUND', (0, 0), (-1, -1), hex_color),  # Usamos HEX en vez de normalizar
             ('BOX', (0, 0), (-1, -1), 1, colors.black),
         ]))
 
         # Añadir recuadro y nombre a la fila actual
         current_row.append(color_box)
-        current_row.append(Paragraph(cls, getSampleStyleSheet()['Normal']))
+        current_row.append(Paragraph(str(cls), getSampleStyleSheet()['Normal']))
 
         # Si alcanzamos un número par de elementos en una fila o es el último elemento, agregamos la fila
         if len(current_row) >= 15 or idx == len(class_colors) - 1:
@@ -60,6 +72,7 @@ def create_legend(class_colors):
     # Crear tabla de leyenda
     legend_table = Table(legend_data, hAlign='LEFT', spaceBefore=20, spaceAfter=20)
     return legend_table
+
 
 
 def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class_names, class_colors, max_examples, metrics_classes, image_examples=None):

@@ -92,7 +92,7 @@ def main():
             print(f"Ruta del archivo ONNX: {onnx_file}")
             
             train_onnx_cmd = [
-                "python", "/app/inference_onnx.py",  # Cambiar al nombre real del script de pruebas
+                "python", "/app/yolov7/object_detection_cellsia/inference_onnx.py",  # Cambiar al nombre real del script de pruebas
                 "--input_dir", str(input_dir),
                 "--img_size", str(args.img_size),
                 "--conf_thres", str(args.conf_thres),
@@ -102,7 +102,7 @@ def main():
                 "--key", str("train")
             ]
             test_onnx_cmd = [
-                "python", "/app/inference_onnx.py",  # Cambiar al nombre real del script de pruebas
+                "python", "/app/yolov7/object_detection_cellsia/inference_onnx.py",  # Cambiar al nombre real del script de pruebas
                 "--input_dir", str(input_dir),
                 "--img_size", str(args.img_size),
                 "--conf_thres", str(args.conf_thres),
@@ -112,7 +112,7 @@ def main():
                 "--key", str("test")
             ]
             val_onnx_cmd = [
-                "python", "/app/inference_onnx.py",  # Cambiar al nombre real del script de pruebas
+                "python", "/app/yolov7/object_detection_cellsia/inference_onnx.py",  # Cambiar al nombre real del script de pruebas
                 "--input_dir", str(input_dir),
                 "--img_size", str(args.img_size),
                 "--conf_thres", str(args.conf_thres),
