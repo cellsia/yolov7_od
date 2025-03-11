@@ -398,7 +398,8 @@ def main(input_dir, session, input_name, output_name, img_size, conf_thres, iou_
         expected_classes_coordinates = {} 
         if os.path.exists(label_path):
             with open(label_path, "r") as f:
-                for line in f:
+                lines = f.readlines()
+                for line in lines:
                     # Leer la clase desde la primera columna
                     label = int(line.strip().split()[0]) 
                     expected_classes[label] = expected_classes.get(label, 0) + 1
@@ -462,10 +463,10 @@ def main(input_dir, session, input_name, output_name, img_size, conf_thres, iou_
     results, maps, times, metrics_class, dataset_stats = test_onnx.test(
         data=data,
         weights=weights,
-        batch_size=1,
+        batch_size=8,
         imgsz=1024,
-        conf_thres=0.25,
-        iou_thres=0.5,
+        conf_thres=0.10,
+        iou_thres=0.6,
         save_json=False,
         save_txt=True,
         save_hybrid=False,
@@ -503,7 +504,7 @@ def main(input_dir, session, input_name, output_name, img_size, conf_thres, iou_
         metrics_classes=metrics_class,
         dataset_stats=dataset_stats,  # Añadir estadísticas del dataset
         confidence_ranges=total_confidence_ranges,  # Añadir rangos de confianza
-        max_examples=max_examples
+        max_examples=max_examples,
     )
     
     return None
@@ -515,8 +516,8 @@ if __name__ == "__main__":
     parser.add_argument('--input_dir', type=str, default="/app/pfs/eosinofilos",help="Directorio del proyecto")
     parser.add_argument('--output_dir', type=str,help="Directorio de salida")
     parser.add_argument('--img_size', type=int, default=1024,help="Tamaño de las imágenes para el modelo")
-    parser.add_argument('--conf_thres', type=float, default=0.25,help="Umbral de confianza")
-    parser.add_argument('--iou_thres', type=float, default=0.5,help="Umbral de IoU")
+    parser.add_argument('--conf_thres', type=float, default=0.10,help="Umbral de confianza")
+    parser.add_argument('--iou_thres', type=float, default=0.6,help="Umbral de IoU")
     parser.add_argument('--augment', type=bool, default=False,help="Augmentación durante la inferencia")
     parser.add_argument('--weights', type=str, default="/app/weights/best.pt",help="Ruta al modelo")
     parser.add_argument('--key', type=str, default="test",help="Dataset a testear")

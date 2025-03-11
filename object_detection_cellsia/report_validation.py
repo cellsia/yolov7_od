@@ -77,25 +77,17 @@ def create_legend(class_colors):
 
 def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class_names, image_examples, 
                                class_colors, metrics_classes, dataset_stats, confidence_ranges, 
-                               max_examples=20, conf_thres=None, iou_thres=None):
+                               max_examples=20, conf_thres=None, iou_thres=None, all_metrics=None):
     doc = SimpleDocTemplate(pdf_path, pagesize=letter)
     elements = []
     styles = getSampleStyleSheet()
 
     # Logo
-    '''
-    logo_path = '/app/assets/logo-cells-black.png'
-    try:
-        elements.append(Image(logo_path, width=150, height=50))
-    except Exception:
-        elements.append(Paragraph("Logo not found.", styles['Normal']))
-    elements.append(Spacer(1, 20))
-    '''
     logo = Image('./assets/logo-cells-black.png', width=(139*0.7), height=(38*0.7)) 
     logo.hAlign = 'LEFT' 
     elements.append(logo)
 
-    # Portada
+    # Portada y estadísticas básicas
     elements.append(Paragraph(f"Inference Results", styles['Title']))
     elements.append(Spacer(1, 10))
     elements.append(Paragraph(f"Model: <b>{model_name}</b>", styles['Normal']))
@@ -110,8 +102,8 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
         elements.append(Spacer(1, 5))
     if iou_thres is not None:
         elements.append(Paragraph(f"IoU Threshold: <b>{iou_thres:.2f}</b>", styles['Normal']))
-    elements.append(Spacer(1, 20)) 
-    
+    elements.append(Spacer(1, 20))
+
     # Create 2x2 statistics table
     stats_data = [
         ["", "Real", "Processed"],
@@ -135,7 +127,41 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
     elements.append(stats_table)
     elements.append(Spacer(1, 20))
 
-    
+    # Tabla de métricas por umbral de confianza (solo para validación)
+    if all_metrics and data_name == 'val':
+        elements.append(Paragraph("Results by Confidence Threshold", styles['Heading2']))
+        elements.append(Spacer(1, 10))
+        
+        confidence_metrics_data = [["Conf", "Precision", "Recall", "mAP@0.5", "mAP@0.5:0.95", "F1"]]
+        for result in all_metrics:
+            conf = result['conf_thres']
+            m = result['metrics']
+            f1 = result['f1']
+            confidence_metrics_data.append([
+                f"{conf:.1f}",
+                f"{m[0]:.3f}",
+                f"{m[1]:.3f}",
+                f"{m[2]:.3f}",
+                f"{m[3]:.3f}",
+                f"{f1:.3f}"
+            ])
+
+        confidence_metrics_table = Table(confidence_metrics_data, colWidths=[60, 80, 80, 80, 80, 60])
+        confidence_metrics_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), HexColor("#1b2a41")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('BACKGROUND', (0, -1), (-1, -1), HexColor("#eae9fa")),
+        ]))
+        
+        elements.append(confidence_metrics_table)
+        elements.append(Spacer(1, 20))
 
     # Crear tabla de métricas
     metrics_data = [["Precision", "Recall", "mAP@0.5", "mAP@0.5:0.95", "Class"]]
@@ -159,9 +185,8 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
             f"{cls_metrics['map@0.5:0.95']:.3f}",
             cls_name
         ])
-
-
-    # Configurar y añadir tabla de métricas
+    
+     # Configurar y añadir tabla de métricas
     metrics_table = Table(metrics_data, colWidths=[80, 80, 80, 80, 80])
     metrics_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), HexColor("#1b2a41")),
@@ -178,6 +203,40 @@ def generate_pdf_with_front_page(pdf_path, model_name, data_name, metrics, class
     ]))
     elements.append(metrics_table)
     elements.append(Spacer(1, 20))
+
+    # Tabla de métricas por clase (solo si hay más de una clase)
+    class_metrics_filtered = {k: v for k, v in metrics_classes.items() if k != 'all'}
+    if len(class_metrics_filtered) > 1:  # Solo mostrar si hay más de una clase
+        class_metrics_data = [["Class", "Precision", "Recall", "mAP@0.5", "mAP@0.5:0.95"]]
+        
+        for cls_name, cls_metrics in class_metrics_filtered.items():
+            class_metrics_data.append([
+                cls_name,
+                f"{cls_metrics['precision']:.3f}",
+                f"{cls_metrics['recall']:.3f}",
+                f"{cls_metrics['map@0.5']:.3f}",
+                f"{cls_metrics['map@0.5:0.95']:.3f}"
+            ])
+
+        class_metrics_table = Table(class_metrics_data, colWidths=[80, 80, 80, 80, 80])
+        class_metrics_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), HexColor("#1b2a41")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('BACKGROUND', (0, 1), (0, -1), HexColor("#eae9fa")),
+            ('ALIGN', (0, 0), (0, -1), 'CENTER'),
+        ]))
+
+        elements.append(Paragraph("Per-Class Metrics", styles['Heading2']))
+        elements.append(Spacer(1, 10))
+        elements.append(class_metrics_table)
+        elements.append(Spacer(1, 20))
 
     # Añadir tabla de distribución de confianza para predicciones
     confidence_data = [["Confidence Range (%)", "Correct Predictions", "Wrong Predictions"]]

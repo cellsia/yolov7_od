@@ -1,5 +1,6 @@
 import argparse
 import json
+import cv2
 import os
 from pathlib import Path
 from threading import Thread
@@ -55,20 +56,44 @@ def test(data,
         (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
         # Load model
-        model = attempt_load(weights, map_location=device)  # load FP32 model
-        gs = max(int(model.stride.max()), 32)  # grid size (max stride)
+        import onnxruntime
+
+        # Verificar si el modelo es ONNX o PyTorch
+        if weights.endswith(".onnx"):
+            session = onnxruntime.InferenceSession(weights, providers=["CUDAExecutionProvider" if device.type != "cpu" else "CPUExecutionProvider"])
+            
+            input_name = session.get_inputs()[0].name
+            print(input_name)
+
+            output_name = session.get_outputs()[0].name
+
+            for inp in session.get_inputs():
+                expected_shape = inp.shape
+            model = session
+            is_onnx = True
+        else:
+            print(f"🔵 Cargando modelo PyTorch: {weights}")
+            model = attempt_load(weights, map_location=device)  # load FP32 model
+            is_onnx = False
+
+        if not isinstance(model, onnxruntime.InferenceSession):  
+            gs = max(int(model.stride.max()), 32)  # Valor predeterminado de stride para YOLOv7 en ONNX
+        else:
+            gs = 32    
+        
         imgsz = check_img_size(imgsz, s=gs)  # check img_size
         
         if trace:
             model = TracedModel(model, device, imgsz)
+    
+    if not isinstance(model, onnxruntime.InferenceSession):
+        half = device.type != 'cpu' and half_precision
+        if half:
+            model.half()
+        model.eval()
+    else:
+        half = False  # ONNX no usa half-precision
 
-    # Half
-    half = device.type != 'cpu' and half_precision  # half precision only supported on CUDA
-    if half:
-        model.half()
-
-    # Configure
-    model.eval()
     if isinstance(data, str):
         is_coco = data.endswith('coco.yaml')
         with open(data) as f:
@@ -85,7 +110,8 @@ def test(data,
     # Dataloader
     if not training:
         if device.type != 'cpu':
-            model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
+            if not isinstance(model, onnxruntime.InferenceSession):
+                model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
         task = opt.task if opt.task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
         dataloader = create_dataloader(data[task], imgsz, batch_size, gs, opt, pad=0.5, rect=True,
                                        prefix=colorstr(f'{task}: '))[0]
@@ -94,9 +120,15 @@ def test(data,
         print("Testing with YOLOv5 AP metric...")
     
     seen = 0
-    total_predictions = 0  # Nuevo contador para predicciones totales
+    total_predictions = 0  # Nuevo contador para predicciones
     confusion_matrix = ConfusionMatrix(nc=nc)
-    names = {k: v for k, v in enumerate(model.names if hasattr(model, 'names') else model.module.names)}
+    # Para PyTorch: usar model.names
+    if not isinstance(model, onnxruntime.InferenceSession):
+        names = {k: v for k, v in enumerate(model.names if hasattr(model, 'names') else model.module.names)}
+    # Para ONNX: definir nombres de clases genéricos
+    else:
+        names = {i: f"class_{i}" for i in range(nc)}  # Generar nombres de clases automáticamente
+
     coco91class = coco80_to_coco91_class()
     s = ('%20s' + '%12s' * 6) % ('Class', 'Images', 'Labels', 'P', 'R', 'mAP@.5', 'mAP@.5:.95')
     p, r, f1, mp, mr, map50, map, t0, t1 = 0., 0., 0., 0., 0., 0., 0., 0., 0.
@@ -104,15 +136,57 @@ def test(data,
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []
     for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
         img = img.to(device, non_blocking=True)
-        img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
+        if not isinstance(model, onnxruntime.InferenceSession):
+            img = img.half() if half else img.float()  # uint8 to fp16/32
+            img /= 255.0  # 0 - 255 to 0.0 - 1.0
+        else:
+
+            img = img.cpu().numpy()  # Mover a la CPU antes de convertir a NumPy
+
+            # Redimensionar la imagen al tamaño esperado
+            expected_size = (imgsz,imgsz) 
+            resized_images = []
+            # Iterar sobre todas las imágenes en el batch
+            for i in range(img.shape[0]):  # Iterar sobre el batch (batch_size)
+                single_img = img[i]  # Extraer la imagen i
+
+                # Si la imagen está en formato (C, H, W), transpónlo a (H, W, C)
+                if single_img.shape[0] == 3:
+                    single_img = single_img.transpose(1, 2, 0)
+
+                # Verificar que la imagen tiene exactamente 3 dimensiones antes de redimensionar
+                if len(single_img.shape) != 3:
+                    raise ValueError(f"Error: La imagen en el batch tiene una forma inesperada: {single_img.shape}")
+
+                # Redimensionar la imagen
+                resized_img = cv2.resize(single_img, expected_size, interpolation=cv2.INTER_LINEAR)
+                
+                # Agregar la imagen redimensionada a la lista
+                resized_images.append(resized_img)
+
+            # Convertir la lista de imágenes redimensionadas a un array NumPy con batch
+            img = np.array(resized_images)
+            img = img.transpose(0, 3, 1, 2)  # Transponer a (C, H, W) para ONNX
+
+            img = img.astype(np.float32) / 255.0
         targets = targets.to(device)
+
         nb, _, height, width = img.shape  # batch size, channels, height, width
 
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            out, train_out = model(img, augment=augment)  # inference and training outputs
+            if is_onnx:
+                print("output_name")
+                print(output_name)
+                print("img shape")
+                print(img.shape)
+                preds = model.run([output_name], {input_name: img})[0]
+                out = torch.tensor(preds).to(device)  # Convertir a tensor para usar con el resto del código
+                train_out = None  # No se usa en ONNX
+            else:
+                out, train_out = model(img, augment=augment)  # inference and training outputs
+            # inference and training outputs
             t0 += time_synchronized() - t
 
             # Compute loss
@@ -123,12 +197,18 @@ def test(data,
             targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
             lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
             t = time_synchronized()
-            out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
+            print("output shape before non_max_supression")
+            print(out.shape)
+            if is_onnx:
+                out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, multi_label=True)
+            else:
+                out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
+                
             t1 += time_synchronized() - t
 
-            # Contar predicciones totales
-            for det in out:
-                total_predictions += len(det)
+        # Contar predicciones totales
+        for det in out:
+            total_predictions += len(det)
 
         # Statistics per image
         for si, pred in enumerate(out):
@@ -253,17 +333,6 @@ def test(data,
                 "class_name": names[c],
             }
 
-    # Añadir contadores de imágenes y predicciones
-    total_images = len(dataloader.dataset)
-    total_processed = seen
-
-    dataset_stats = {
-        'total_images': total_images,
-        'processed_images': total_processed,
-        'total_labels': int(nt.sum()),
-        'total_predictions': total_predictions
-    }
-
     # Print speeds
     t = tuple(x / seen * 1E3 for x in (t0, t1, t0 + t1)) + (imgsz, imgsz, batch_size)  # tuple
     if not training:
@@ -303,8 +372,20 @@ def test(data,
         except Exception as e:
             print(f'pycocotools unable to run: {e}')
 
+    # Añadir contadores de imágenes
+    total_images = len(dataloader.dataset)  # Total de imágenes en el dataset
+    total_processed = seen  # Imágenes procesadas
+
+    # Añadir el conteo a las métricas de retorno
+    dataset_stats = {
+        'total_images': total_images,
+        'processed_images': total_processed,
+        'total_labels': int(nt.sum()),
+        'total_predictions': total_predictions  # Nueva métrica
+    }
+
     # Return results
-    model.float()  # for training
+    #model.float()  # for training
     if not training:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
         print(f"Results saved to {save_dir}{s}")

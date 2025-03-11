@@ -32,7 +32,8 @@ def ap_per_class(tp, conf, pred_cls, target_cls, v5_metric=False, plot=False, sa
     # Sort by objectness
     i = np.argsort(-conf)
     tp, conf, pred_cls = tp[i], conf[i], pred_cls[i]
-
+    #print(conf used)
+    print(conf)
     # Find unique classes
     unique_classes = np.unique(target_cls)
     nc = unique_classes.shape[0]  # number of classes, number of detections
@@ -40,6 +41,8 @@ def ap_per_class(tp, conf, pred_cls, target_cls, v5_metric=False, plot=False, sa
     # Create Precision-Recall curve and compute AP for each class
     px, py = np.linspace(0, 1, 1000), []  # for plotting
     ap, p, r = np.zeros((nc, tp.shape[1])), np.zeros((nc, 1000)), np.zeros((nc, 1000))
+    raw_precision, raw_recall = [], []  # Lista para almacenar precision y recall sin interpolar
+
     for ci, c in enumerate(unique_classes):
         i = pred_cls == c
         n_l = (target_cls == c).sum()  # number of labels
@@ -51,14 +54,32 @@ def ap_per_class(tp, conf, pred_cls, target_cls, v5_metric=False, plot=False, sa
             # Accumulate FPs and TPs
             fpc = (1 - tp[i]).cumsum(0)
             tpc = tp[i].cumsum(0)
+            print("\n1. Acumulación de resultados:")
+            print(f"TPC{tpc}")
+            print(f"True Positives (TP): {tpc[-1][0]}")
+            print(f"False Positives (FP): {fpc[-1][0]}")
+            print(f"False Negatives (FN): {n_l - tpc[-1][0]}")
+
 
             # Recall
             recall = tpc / (n_l + 1e-16)  # recall curve
+            print(f"\n2. Cálculo de Recall:")
+            print(f"2.1 Recall inicial = TP / (TP + FN) = {recall[-1][0]}")
+            
             r[ci] = np.interp(-px, -conf[i], recall[:, 0], left=0)  # negative x, xp because xp decreases
-
+            
+ 
             # Precision
             precision = tpc / (tpc + fpc)  # precision curve
+            print(f"\n3. Cálculo de Precision:")
+            print(f"3.1 Precision inicial = TP / (TP + FP) =  {precision}")
+            
+            
             p[ci] = np.interp(-px, -conf[i], precision[:, 0], left=1)  # p at pr_score
+            
+            # Guardar precision y recall sin interpolar
+            raw_precision.append(precision[-1][0])  # Solo para el primer umbral IoU
+            raw_recall.append(recall[-1][0])
 
             # AP from recall-precision curve
             for j in range(tp.shape[1]):
@@ -68,6 +89,7 @@ def ap_per_class(tp, conf, pred_cls, target_cls, v5_metric=False, plot=False, sa
 
     # Compute F1 (harmonic mean of precision and recall)
     f1 = 2 * p * r / (p + r + 1e-16)
+            
     if plot:
         plot_pr_curve(px, py, ap, Path(save_dir) / 'PR_curve.png', names)
         plot_mc_curve(px, f1, Path(save_dir) / 'F1_curve.png', names, ylabel='F1')
@@ -75,7 +97,7 @@ def ap_per_class(tp, conf, pred_cls, target_cls, v5_metric=False, plot=False, sa
         plot_mc_curve(px, r, Path(save_dir) / 'R_curve.png', names, ylabel='Recall')
 
     i = f1.mean(0).argmax()  # max F1 index
-    return p[:, i], r[:, i], ap, f1[:, i], unique_classes.astype('int32')
+    return p[:, i], r[:, i], ap, f1[:, i], unique_classes.astype('int32'), raw_precision, raw_recall
 
 
 def compute_ap(recall, precision, v5_metric=False):

@@ -31,6 +31,54 @@ from utils.general import scale_coords
 from utils.metrics import ap_per_class
 from report import generate_pdf_with_front_page
 
+def plot_striped_box(img, xyxy, color1, color2, conf=None, line_thickness=2, stripe_length=15):
+    """
+    Dibuja una caja con el patrón de rayas alternadas en la línea superior.
+    color1: color de la clase (BGR)
+    color2: color rojo para las rayas (BGR)
+    """
+    x1, y1, x2, y2 = map(int, xyxy)
+    
+    # Dibujar los tres lados completos con el color de la clase
+    cv2.line(img, (x1, y2), (x2, y2), color1, line_thickness)  # línea inferior
+    cv2.line(img, (x1, y1), (x1, y2), color1, line_thickness)  # línea izquierda
+    cv2.line(img, (x2, y1), (x2, y2), color1, line_thickness)  # línea derecha
+    
+    # Dibujar la línea superior con patrón de rayas alternadas
+    total_width = x2 - x1
+    current_x = x1
+    is_red = True  # Empezar con rojo
+    
+    while current_x < x2:
+        end_x = min(current_x + stripe_length, x2)
+        color = color2 if is_red else color1  # Alternar entre rojo y color de clase
+        cv2.line(img, (current_x, y1), (end_x, y1), color, line_thickness)
+        current_x = end_x
+        is_red = not is_red  # Cambiar color para el siguiente segmento
+    
+    # Añadir texto de confianza si se proporciona
+    if conf is not None:
+        conf_str = f"{conf:.2f}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        font_thickness = 2
+        
+        (text_width, text_height), baseline = cv2.getTextSize(conf_str, font, font_scale, font_thickness)
+        
+        margin = 2
+        text_x = x1
+        text_y = y1 - margin
+        
+        # Dibujar fondo del texto
+        cv2.rectangle(img, 
+                     (text_x, text_y - text_height - margin),
+                     (text_x + text_width + margin * 2, text_y + margin),
+                     color2, -1)
+        
+        # Dibujar texto
+        cv2.putText(img, conf_str, (text_x + margin, text_y - margin), 
+                    font, font_scale, (255, 255, 255), font_thickness)
+
 def load_model(weights, device):
     device = select_device(device)
 
@@ -44,28 +92,41 @@ def load_model(weights, device):
     print("Modelo cargado .pt y dispositivo configurado.")
     return model, half
 
+def is_forbidden_color(color):
+    """
+    Comprueba si un color RGB está en el rango de rojos, rosas, morados o grises.
+    """
+    r, g, b = color
+    
+    # Detectar rojos (R alto, G y B bajos)
+    is_red = r > 150 and g < 100 and b < 100
+    
+    # Detectar rosas (R y B altos, G bajo)
+    is_pink = r > 150 and b > 150 and g < 100
+    
+    # Detectar morados (R y B altos, pero R menor que en rosa)
+    is_purple = r > 100 and b > 150 and g < 100
+    
+    # Detectar grises (diferencia entre canales menor a 30)
+    is_grey = abs(r - g) < 30 and abs(g - b) < 30 and abs(r - b) < 30
+    
+    # Detectar verdes (G alto, R y B bajos)
+    is_green = g > 150 and r < 100 and b < 100
+    
+    return is_red or is_pink or is_purple or is_grey or is_green
+
 def get_names_colors(model):
-
     names = model.module.names if hasattr(model, 'module') else model.names
-
     
-    colors = {int(i): (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)) for i in range(len(names))}
-    
-    class_colors = {int(name): colors[i] for i, name in enumerate(names)}
-
-    true_colors = {}
-    for cls_id in range(len(names)):
+    colors = {}
+    for i in range(len(names)):
         while True:
             color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
-            if color != colors[cls_id]:  # Asegurarse de que no coincidan
-                true_colors[cls_id] = color
+            if not is_forbidden_color(color):
+                colors[int(i)] = color
                 break
-
     
-    print("Nombres de clases y colores configurados:")
-    print("Clases:", names)
-    #print("Ejemplo de colores:", colors[:3])  # Imprimir algunos colores de ejemplo
-
+    class_colors = {int(name): colors[i] for i, name in enumerate(names)}
     return names, class_colors
 
 def configurar_rutas(input_dir, output_dir, key):
@@ -145,73 +206,176 @@ def realizar_inferencia(model, img, augment, conf_thres, iou_thres, classes, agn
     pred = non_max_suppression(preds, conf_thres, iou_thres, classes=classes, agnostic=agnostic_nms)
     return pred
 
-def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_images_dir, path, image_examples, expected_classes):
+def calculate_iou(box1, box2):
     """
-    Procesa las detecciones, guarda resultados en archivos, dibuja en imágenes y extrae las cajas detectadas.
+    Calcula IoU entre dos cajas.
+    box format: (x1, y1, x2, y2)
+    """
+    # Área de intersección
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    if x2 < x1 or y2 < y1:
+        return 0.0
+        
+    intersection = (x2 - x1) * (y2 - y1)
+    
+    # Áreas de las cajas
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    
+    # IoU
+    iou = intersection / float(box1_area + box2_area - intersection)
+    return iou
+
+def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_images_dir, path, image_examples, expected_classes, expected_classes_coordinates):
+    """
+    Procesa las detecciones, verificando IoU con las etiquetas reales.
     """
     detected_classes = {}
     detecciones_procesadas = False
-    detected_boxes = [] 
+    confidence_ranges = {
+        '0-10': {'correct': 0, 'incorrect': 0},
+        '10-20': {'correct': 0, 'incorrect': 0},
+        '20-30': {'correct': 0, 'incorrect': 0},
+        '30-40': {'correct': 0, 'incorrect': 0},
+        '40-50': {'correct': 0, 'incorrect': 0},
+        '50-60': {'correct': 0, 'incorrect': 0},
+        '60-70': {'correct': 0, 'incorrect': 0},
+        '70-80': {'correct': 0, 'incorrect': 0},
+        '80-90': {'correct': 0, 'incorrect': 0},
+        '90-100': {'correct': 0, 'incorrect': 0}
+    }
+    iou_threshold = 0.5
 
-    # Abrir archivo para guardar detecciones
     with open(txt_path, "w") as f:
+        # Primero dibujamos las cajas ground truth no detectadas en verde
+        matched_boxes = set()
+        
+        # Procesar detecciones primero para marcar las coincidencias
+        if len(pred[0]):
+            det = pred[0]
+            det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0s.shape).round()
+            for *xyxy, conf, cls in reversed(det):
+                predicted_class = int(cls)
+                detected_box = tuple(map(int, xyxy))
+                
+                if predicted_class in expected_classes_coordinates:
+                    for idx, gt_box in enumerate(expected_classes_coordinates[predicted_class]):
+                        if idx not in matched_boxes and calculate_iou(detected_box, gt_box) >= iou_threshold:
+                            matched_boxes.add((predicted_class, idx))
+                            break
+        
+        # Dibujar cajas ground truth no detectadas en verde
+        for class_id, boxes in expected_classes_coordinates.items():
+            for idx, box in enumerate(boxes):
+                if (class_id, idx) not in matched_boxes:
+                    x_min, y_min, x_max, y_max = map(int, box)
+                    cv2.rectangle(im0s, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+
         for i, det in enumerate(pred):
-            if len(det):  # Si hay detecciones
+            if len(det):
                 print(f" - Detecciones encontradas: {len(det)}")
                 detecciones_procesadas = True
-                # Escalar coordenadas a la imagen original
                 det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0s.shape).round()
 
+                # Marcamos las cajas de ground truth que ya han sido emparejadas
+                matched_gt_boxes = set()
+
                 for *xyxy, conf, cls in reversed(det):
-                    predicted_class = int(cls)  # Clase predicha
+                    predicted_class = int(cls)
                     detected_classes[predicted_class] = detected_classes.get(predicted_class, 0) + 1
 
-                    # Extraer coordenadas de las cajas detectadas
+                    # Coordenadas de la caja detectada
                     x_min, y_min, x_max, y_max = map(int, xyxy)
-                    detected_boxes.append((x_min, y_min, x_max, y_max))  # Añadir a detected_boxes
+                    detected_box = (x_min, y_min, x_max, y_max)
 
-                    # Guardar detecciones en archivo .txt
+                    # Guardar coordenadas y detección
                     x_center = (x_min + x_max) / 2
                     y_center = (y_min + y_max) / 2
                     width = x_max - x_min
                     height = y_max - y_min
+                    
+                    # Guardar en archivo .txt
                     f.write(f"{predicted_class} {x_center / im0s.shape[1]:.6f} {y_center / im0s.shape[0]:.6f} "
-                            f"{width / im0s.shape[1]:.6f} {height / im0s.shape[0]:.6f} {conf:.6f}\n")
+                           f"{width / im0s.shape[1]:.6f} {height / im0s.shape[0]:.6f} {conf:.6f}\n")
 
-                    # Dibujar detección predicha en la imagen
-                    label = f'{names[predicted_class]} {conf:.2f}'
+                    # Verificar si la detección coincide con alguna caja ground truth
+                    is_correct = False
+                    if predicted_class in expected_classes_coordinates:
+                        for idx, gt_box in enumerate(expected_classes_coordinates[predicted_class]):
+                            if idx not in matched_gt_boxes:
+                                iou = calculate_iou(detected_box, gt_box)
+                                if iou >= iou_threshold:
+                                    is_correct = True
+                                    matched_gt_boxes.add(idx)
+                                    break
+
+                    # Debug print como en inference_onnx
+                    print(f"Clase {predicted_class}: {'correcta' if is_correct else 'incorrecta'} "
+                          f"(IoU máximo: {iou if 'iou' in locals() else 0:.3f})")
+
+                    # Obtener color y convertir a BGR
                     bgr_color = (colors[predicted_class][2], colors[predicted_class][1], colors[predicted_class][0])
 
-                    plot_one_box(xyxy, im0s, color=bgr_color, line_thickness=2)
-            '''
-            # Añadir etiquetas reales (clases esperadas)
-            for expected_class, bboxes in expected_classes_coordinates.items():
-                for bbox in bboxes:
-                    x_min, y_min, x_max, y_max = bbox
-                    xyxy = [x_min, y_min, x_max, y_max]
-                    y_true.append(expected_class)  # Añadir clase real
-                    label = f'{names[expected_class]}'
-                    # Dibujar etiqueta real en la imagen
-                    plot_one_box(xyxy, im0s, label=label, color=true_colors[expected_class], line_thickness=2)
-            '''
-        # Guardar la imagen procesada con detecciones
-        processed_img_path = processed_images_dir / f"{Path(path).stem}_processed.jpg"
+                    if not is_correct:
+                        # Actualizar rangos de confianza para predicciones incorrectas
+                        conf_value = float(conf) * 100
+                        for range_key in confidence_ranges.keys():
+                            min_val, max_val = map(int, range_key.split('-'))
+                            if min_val <= conf_value < max_val:
+                                confidence_ranges[range_key]['incorrect'] += 1
+                                break
+                        # Dibujar caja con línea roja y mostrar confianza
+                        plot_striped_box(im0s, xyxy, bgr_color, (0, 0, 255), conf=conf, line_thickness=2)
+                    else:
+                        # Dibujar caja normal para detecciones correctas
+                        plot_one_box(xyxy, im0s, color=bgr_color, line_thickness=2)
 
+                    # Categorizar la confianza en rangos
+                    conf_value = float(conf) * 100  # Convertir a porcentaje
+                    for range_key in confidence_ranges.keys():
+                        min_val, max_val = map(int, range_key.split('-'))
+                        if min_val <= conf_value < max_val:
+                            if is_correct:
+                                confidence_ranges[range_key]['correct'] += 1
+                            else:
+                                confidence_ranges[range_key]['incorrect'] += 1
+                            break
+
+        # Guardar imagen procesada
+        processed_img_path = processed_images_dir / f"{Path(path).stem}_processed.jpg"
         cv2.imwrite(str(processed_img_path), im0s)
         print(f"Imagen procesada guardada en: {processed_img_path}")
-
+        
         image_examples.append((str(processed_img_path), expected_classes, detected_classes))
 
     if not detecciones_procesadas:
         print(" - No se encontraron detecciones válidas tras aplicar NMS.")
-    return image_examples
-
+    
+    return image_examples, confidence_ranges, detected_classes
 
 def main(input_dir, img_size, model, device, half, conf_thres, iou_thres, classes, augment, names, data_config, weights, output_dir, key, class_colors, max_examples=20):
     base_path,  labels_dir, labels_dir2, processed_images_dir = configurar_rutas(input_dir, output_dir, key)
     txt_file_path = obtener_ruta_desde_yaml(data_config, key=key)
     image_paths = leer_rutas_imagenes(base_path, txt_file_path)
     image_examples = []
+    
+    total_detected_classes = {}  # Add this to track all detections
+    total_confidence_ranges = {
+        '0-10': {'correct': 0, 'incorrect': 0},
+        '10-20': {'correct': 0, 'incorrect': 0},
+        '20-30': {'correct': 0, 'incorrect': 0},
+        '30-40': {'correct': 0, 'incorrect': 0},
+        '40-50': {'correct': 0, 'incorrect': 0},
+        '50-60': {'correct': 0, 'incorrect': 0},
+        '60-70': {'correct': 0, 'incorrect': 0},
+        '70-80': {'correct': 0, 'incorrect': 0},
+        '80-90': {'correct': 0, 'incorrect': 0},
+        '90-100': {'correct': 0, 'incorrect': 0}
+    }
 
     for img_path in image_paths:
         # Obtener el nombre base de la imagen y encontrar su archivo de etiquetas
@@ -257,7 +421,20 @@ def main(input_dir, img_size, model, device, half, conf_thres, iou_thres, classe
         pred = realizar_inferencia(model, img, augment=augment, conf_thres=conf_thres, iou_thres=iou_thres, classes=classes, agnostic_nms=False)
         
         txt_path = labels_dir2 / f"{Path(path).stem}.txt"
-        image_examples = procesar_detecciones(pred, img, im0s, names, class_colors, txt_path, processed_images_dir, path, image_examples, expected_classes)
+        image_examples, conf_ranges, current_detected_classes = procesar_detecciones(
+            pred, img, im0s, names, class_colors, txt_path, 
+            processed_images_dir, path, image_examples, expected_classes,
+            expected_classes_coordinates  # Añadir este parámetro
+        )
+        
+        # Update total detections
+        for cls, count in current_detected_classes.items():
+            total_detected_classes[cls] = total_detected_classes.get(cls, 0) + count
+            
+        # Acumular rangos de confianza
+        for range_key in conf_ranges:
+            total_confidence_ranges[range_key]['correct'] += conf_ranges[range_key]['correct']
+            total_confidence_ranges[range_key]['incorrect'] += conf_ranges[range_key]['incorrect']
 
            # break
 
@@ -285,6 +462,13 @@ def main(input_dir, img_size, model, device, half, conf_thres, iou_thres, classe
         verbose=True
     )
 
+    # Crear dataset_stats manualmente
+    dataset_stats = {
+        'total_images': len(image_paths),
+        'processed_images': len(image_paths),
+        'total_labels': sum(total_detected_classes.values()) if total_detected_classes else 0
+    }
+
     mp, mr, map50, map2, loss = results[:5]
     print(f"Precisión media: {mp:.3f}")
     print(f"Recall medio: {mr:.3f}")
@@ -311,6 +495,8 @@ def main(input_dir, img_size, model, device, half, conf_thres, iou_thres, classe
         image_examples = image_examples, 
         class_colors=class_colors,
         metrics_classes=metrics_class,
+        dataset_stats=dataset_stats,
+        confidence_ranges=total_confidence_ranges,
         max_examples=max_examples
     )
     
@@ -327,7 +513,7 @@ if __name__ == "__main__":
     parser.add_argument('--output_dir', type=str,help="Directorio de salida")
     parser.add_argument('--img_size', type=int, default=1024,help="Tamaño de las imágenes para el modelo")
     parser.add_argument('--conf_thres', type=float, default=0.25,help="Umbral de confianza")
-    parser.add_argument('--iou_thres', type=float, default=0.45,help="Umbral de IoU")
+    parser.add_argument('--iou_thres', type=float, default=0.5,help="Umbral de IoU")
     parser.add_argument('--augment', type=bool, default=False,help="Augmentación durante la inferencia")
     parser.add_argument('--weights', type=str, default="/app/weights/best.pt",help="Ruta al modelo")
     parser.add_argument('--key', type=str, default="test",help="Dataset a testear")

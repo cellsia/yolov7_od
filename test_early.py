@@ -21,9 +21,9 @@ from utils.torch_utils import select_device, time_synchronized, TracedModel
 def test(data,
          weights=None,
          batch_size=32,
-         imgsz=640,
-         conf_thres=0.001,
-         iou_thres=0.6,  # for NMS
+         imgsz=1024,
+         conf_thres=0.10,  # Updated default to match typical usage
+         iou_thres=0.5,    # Updated default to match typical usage
          save_json=False,
          single_cls=False,
          augment=False,
@@ -41,6 +41,11 @@ def test(data,
          trace=False,
          is_coco=False,
          v5_metric=False):
+    
+    # Log the thresholds being used
+    if verbose:
+        print(f"Using confidence threshold: {conf_thres}, IoU threshold: {iou_thres}")
+
     # Initialize/load model and set device
     training = model is not None
     if training:  # called by train.py
@@ -296,7 +301,7 @@ if __name__ == '__main__':
     parser.add_argument('--data', type=str, default='data/coco.yaml', help='*.data path')
     parser.add_argument('--batch-size', type=int, default=32, help='size of each image batch')
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
-    parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
+    parser.add_argument('--conf-thres', type=float, default=0.25, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.65, help='IOU threshold for NMS')
     parser.add_argument('--task', default='val', help='train, val, test, speed or study')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')

@@ -23,7 +23,7 @@ from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
-import test_early as test  # import test.py to get mAP after each epoch
+import test_early_2 as test  # import test.py to get mAP after each epoch
 from models.experimental import attempt_load
 from models.yolo import Model
 from utils.autoanchor import check_anchors
@@ -41,9 +41,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-# Comment out or modify this line to use both GPUs
-# os.environ["CUDA_VISIBLE_DEVICES"] = ""
-# To use both GPUs (0 and 1):
+# Forzar uso de GPU 0
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
@@ -543,11 +541,26 @@ def train(hyp, opt, device, tb_writer=None):
                     logger.info("Early stopping triggered!")
                     break
 
-                # Mostrar métricas de cada época
+                # Mostrar métricas de cada época incluyendo raw precision y recall
                 metrics_msg = (f'\nEpoch {epoch}/{epochs - 1}:'
-                             f'\n * Training Metrics - Precision: {train_results[0]:.3f}, Recall: {train_results[1]:.3f}, mAP@0.5: {train_results[2]:.3f}, mAP@0.5:0.95: {train_results[3]:.3f}, Loss: {train_results[4]:.3f}'
-                             f'\n * Validation Metrics - Precision: {results[0]:.3f}, Recall: {results[1]:.3f}, mAP@0.5: {results[2]:.3f}, mAP@0.5:0.95: {results[3]:.3f}, Loss: {results[4]:.3f}'
-                             f'\n * Learning Rate - lr0: {lr[0]}, lr1: {lr[1]}, lr2: {lr[2]}')
+                             f'\n * Training Metrics:'
+                             f'\n   - Precision: {train_results[0]:.3f}'
+                             f'\n   - Recall: {train_results[1]:.3f}'
+                             f'\n   - mAP@0.5: {train_results[2]:.3f}'
+                             f'\n   - mAP@0.5:0.95: {train_results[3]:.3f}'
+                             f'\n   - Raw Precision: {train_results[5]:.3f}'
+                             f'\n   - Raw Recall: {train_results[6]:.3f}'
+                             f'\n * Validation Metrics:'
+                             f'\n   - Precision: {results[0]:.3f}'
+                             f'\n   - Recall: {results[1]:.3f}'
+                             f'\n   - mAP@0.5: {results[2]:.3f}'
+                             f'\n   - mAP@0.5:0.95: {results[3]:.3f}'
+                             f'\n   - Raw Precision: {results[5]:.3f}'
+                             f'\n   - Raw Recall: {results[6]:.3f}'
+                             f'\n * Learning Rate:'
+                             f'\n   - lr0: {lr[0]}'
+                             f'\n   - lr1: {lr[1]}'
+                             f'\n   - lr2: {lr[2]}')
                 logger.info(metrics_msg)
 
             # Write
@@ -653,7 +666,7 @@ if __name__ == '__main__':
     parser.add_argument('--weights', type=str, default='yolo7.pt', help='initial weights path')
     parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
     parser.add_argument('--data', type=str, default='data/coco.yaml', help='data.yaml path')
-    parser.add_argument('--hyp', type=str, default='data/hyp.scratch.yolor.yaml', help='hyperparameters path')
+    parser.add_argument('--hyp', type=str, default='data/hyp.scratch.p5.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=300)
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
     parser.add_argument('--img-size', nargs='+', type=int, default=[1024, 1024], help='[train, test] image sizes')
@@ -687,7 +700,7 @@ if __name__ == '__main__':
     parser.add_argument('--artifact_alias', type=str, default="latest", help='version of dataset artifact to be used')
     parser.add_argument('--freeze', nargs='+', type=int, default=[0], help='Freeze layers: backbone of yolov7=50, first3=0 1 2')
     parser.add_argument('--v5-metric', action='store_true', help='assume maximum recall as 1.0 in AP calculation')
-    parser.add_argument('--conf-thres', type=float, default=0.1, help='object confidence threshold')
+    parser.add_argument('--conf-thres', type=float, default=0.10, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
     
     # Añadir el argumento task

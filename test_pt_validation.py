@@ -1,11 +1,8 @@
 import argparse
 import json
-import cv2
 import os
 from pathlib import Path
 from threading import Thread
-import random  # Add this import
-import logging  # Add this import
 
 import numpy as np
 import torch
@@ -13,23 +10,51 @@ import yaml
 from tqdm import tqdm
 
 from models.experimental import attempt_load
-from utils.datasets import create_dataloader
+from utils.datasets import create_dataloader, LoadStreams, LoadImages
 from utils.general import coco80_to_coco91_class, check_dataset, check_file, check_img_size, check_requirements, \
     box_iou, non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, increment_path, colorstr
 from utils.metrics import ap_per_class, ConfusionMatrix
-from utils.plots import plot_images, output_to_target, plot_study_txt, plot_one_box  # Add plot_one_box here
+from utils.plots import plot_images, output_to_target, plot_study_txt, plot_one_box
 from utils.torch_utils import select_device, time_synchronized, TracedModel
-import onnxruntime
+from object_detection_cellsia.report_validation import generate_pdf_with_front_page
+import cv2
+from numpy import random
+import logging
 
 
 class Opt:
-    def __init__(self, key):
-        self.device = ''  # 'cuda:0' o 'cpu'
+    def __init__(self, key, data_path, weights_path, 
+                 batch_size=32, img_size=1024, iou_thres=0.5,
+                 save_json=False, single_cls=False, augment=False,
+                 verbose=False, save_txt=False, save_hybrid=False, 
+                 save_conf=False, trace=True, v5_metric=False,
+                 no_trace=False, save_images=False, save_report=False,
+                 max_examples=20, plots=True, output_dir=None):  # Added output_dir parameter
+        self.device = 'cpu'
         self.project = 'runs/test'
         self.name = 'exp'
         self.exist_ok = False
-        self.task = key 
-        self.single_cls = False
+        self.task = key
+        self.single_cls = single_cls
+        self.data = data_path
+        self.weights = weights_path
+        self.batch_size = batch_size
+        self.img_size = img_size
+        self.iou_thres = iou_thres
+        self.save_json = save_json
+        self.augment = augment
+        self.verbose = verbose
+        self.save_txt = save_txt
+        self.save_hybrid = save_hybrid
+        self.save_conf = save_conf
+        self.trace = trace
+        self.v5_metric = v5_metric
+        self.no_trace = False # Added no_trace attribute
+        self.save_images = save_images  # Added save_images attribute
+        self.save_report = save_report  # Added save_report attribute
+        self.max_examples = max_examples  # For report generation
+        self.plots = plots  # For confusion matrix and other plots
+        self.output_dir = output_dir  # Added output_dir attribute
 
 def plot_striped_box(img, xyxy, color1, color2, conf=None, line_thickness=2, stripe_length=15):
     """
@@ -74,7 +99,7 @@ def plot_striped_box(img, xyxy, color1, color2, conf=None, line_thickness=2, str
             cv2.putText(img, conf_str, (text_x + margin, text_y - margin), 
                         font, font_scale, (255, 255, 255), font_thickness)
     except Exception as e:
-        logging.info(f"Error en plot_striped_box: {e}")
+        logging.error(f"Error en plot_striped_box: {e}")
 
 
 def get_random_color(used_colors):
@@ -152,7 +177,7 @@ def test(data,
          weights=None,
          batch_size=32,
          imgsz=1024,
-         conf_thres=0.25,
+         conf_thres=0.10,
          iou_thres=0.5,  # for NMS
          save_json=False,
          single_cls=False,
@@ -171,19 +196,42 @@ def test(data,
          trace=False,
          is_coco=False,
          v5_metric=False,
-         output_dir=None,  # Añadir este parámetro
-         key='test'):     # Añadir este parámetro
+         output_dir=None,
+         key='test'):
+    # Add debug logging for output_dir
+    logging.info(f"test() called with output_dir: {output_dir}")
     
+    # Initialize opt at the beginning of test function
     global opt
-    opt = Opt(key)
-    opt.device = device if 'device' in locals() else ''
+    print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    print(output_dir)
+    opt = Opt(key, data, weights, 
+              batch_size=batch_size, 
+              img_size=imgsz,
+              iou_thres=iou_thres,
+              save_json=save_json,
+              single_cls=single_cls,
+              augment=augment,
+              verbose=verbose,
+              save_txt=save_txt,
+              save_hybrid=save_hybrid,
+              save_conf=save_conf,
+              trace=False,
+              v5_metric=v5_metric,
+              no_trace=False,
+              save_images=(output_dir is not None),  # Set based on output_dir
+              save_report=(output_dir is not None),  # Set based on output_dir
+              max_examples=20,  # Default value
+              plots=plots,  # Pass plots parameter
+              output_dir=output_dir)  # Pass output_dir parameter
+    device = 'cpu' if opt.device == 'cpu' else 'cuda'  # Properly handle device selection
+    opt.device = device
     model_name = str(data).split('/')[2]
 
     # Initialize/load model and set device
     training = model is not None
     if training:  # called by train.py
         device = next(model.parameters()).device  # get model device
-
     else:  # called directly
         set_logging()
         device = select_device(opt.device, batch_size=batch_size)
@@ -192,100 +240,66 @@ def test(data,
         save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
         (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
-        # Modificar esta parte para manejar weights como lista
-        if isinstance(weights, list):
-            weight_path = weights[0]  # Tomar el primer elemento si es lista
-        else:
-            weight_path = weights
-
         # Load model
-        session = onnxruntime.InferenceSession(weight_path, providers=["CUDAExecutionProvider" if device.type != "cpu" else "CPUExecutionProvider"])
-        
-        input_name = session.get_inputs()[0].name
-
-        output_name = session.get_outputs()[0].name
-
-        for inp in session.get_inputs():
-            expected_shape = inp.shape
-        model = session
-        is_onnx = True
-
-        if not isinstance(model, onnxruntime.InferenceSession):  
-            gs = max(int(model.stride.max()), 32)  # Valor predeterminado de stride para YOLOv7 en ONNX
-        else:
-            gs = 32    
-        
+        model = attempt_load(weights, map_location=device)  # load FP32 model
+        gs = max(int(model.stride.max()), 32)  # grid size (max stride)
         imgsz = check_img_size(imgsz, s=gs)  # check img_size
-    
-    half = False  # ONNX no usa half-precision
-    
+        
+        if trace:
+            model = TracedModel(model, device, imgsz)
+
+    # Half precision only for CUDA
+    half = device.type != 'cpu' and half_precision  # half precision only supported on CUDA
+    if half:
+        model.half()  # to FP16
+
+    # Configure
+    model.eval()
     if isinstance(data, str):
         is_coco = data.endswith('coco.yaml')
         with open(data) as f:
             data = yaml.load(f, Loader=yaml.SafeLoader)
-            logging.info("\n=== Dataset Configuration ===")
-            logging.info(f"Loaded data config: {data}")
-            logging.info(f"Training path: {data.get('train')}")
-            logging.info(f"Validation path: {data.get('val')}")
-            logging.info(f"Test path: {data.get('test')}")
+            if key not in data:
+                logging.warning(f"Conjunto '{key}' no encontrado en el YAML, usando 'test' como fallback")
+                key = 'test'
+            logging.info(f"\n=== Dataset Configuration ===")
+            logging.info(f"Using dataset: {key}")
+            logging.info(f"Path: {data.get(key)}")
             logging.info(f"Number of classes: {data.get('nc')}")
             logging.info(f"Class names: {data.get('names')}")
             logging.info("==========================\n")
-
     check_dataset(data)  # check
     nc = 1 if single_cls else int(data['nc'])  # number of classes
     iouv = torch.linspace(0.5, 0.95, 10).to(device)  # iou vector for mAP@0.5:0.95
-    niou = iouv.numel()  # Add this line to define niou
+    niou = iouv.numel()
 
-    # Initialize colors after loading model and classes
+    # Configurar colores para las clases después de cargar el modelo
     colors = {}
     used_colors = set()
-    for i in range(nc):
+    for i in range(nc):  # nc es el número de clases
         color = get_random_color(used_colors)
         colors[i] = color
         used_colors.add(color)
-        
+
     # Logging
     log_imgs = 0
     if wandb_logger and wandb_logger.wandb:
         log_imgs = min(wandb_logger.log_imgs, 100)
     # Dataloader
     if not training:
-        task = opt.task if opt.task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
-        logging.info(f"\n=== Dataloader Configuration ===")
-        logging.info(f"Task: {task}")
-        logging.info(f"Dataset path: {data[task]}")
-        
-        try:
-            dataloader = create_dataloader(
-                data[task], 
-                imgsz, 
-                batch_size, 
-                gs, 
-                opt, 
-                pad=0.5, 
-                rect=True,
-                prefix=colorstr(f'{task}: ')
-            )[0]
-            
-            logging.info(f"Dataset size: {len(dataloader.dataset)} images")
-            logging.info(f"Batch size: {batch_size}")
-            logging.info(f"Image size: {imgsz}")
-            
-            # # Print information about first batch
-            # batch = next(iter(dataloader))
-            # img, targets, paths, shapes = batch
-        except Exception as e:
-            logging.info(f"Error creating dataloader: {e}")
-            raise
+        if device.type != 'cpu':
+            model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
+        # Usar key en lugar de task para seleccionar el conjunto de datos correcto
+        dataloader = create_dataloader(data[key], imgsz, batch_size, gs, opt, pad=0.5, rect=True,
+                                     prefix=colorstr(f'{key}: '))[0]
 
     if v5_metric:
         logging.info("Testing with YOLOv5 AP metric...")
     
     seen = 0
-    total_predictions = 0  # Nuevo contador para predicciones
+    total_predictions = 0  # Nuevo contador para predicciones totales
     confusion_matrix = ConfusionMatrix(nc=nc)
-    names = {i: f"class_{i}" for i in range(nc)}  # Generar nombres de clases automáticamente
+    names = {k: v for k, v in enumerate(model.names if hasattr(model, 'names') else model.module.names)}
     coco91class = coco80_to_coco91_class()
     s = ('%20s' + '%12s' * 6) % ('Class', 'Images', 'Labels', 'P', 'R', 'mAP@.5', 'mAP@.5:.95')
     p, r, f1, mp, mr, map50, map, t0, t1 = 0., 0., 0., 0., 0., 0., 0., 0., 0.
@@ -293,14 +307,15 @@ def test(data,
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []
 
     # Configurar directorios para imágenes procesadas y labels
+    labels_dir = None
+    processed_images_dir = None
     if output_dir:
-        output_path = Path(output_dir) / "resultados" / "onnx" / key
+        output_path = Path(output_dir) / "resultados" / "pt" / key
         processed_images_dir = output_path / "processed_images"
-        labels_dir = output_path / "labels"
+        labels_dir = output_path / "labels"  # Nuevo directorio para labels
         processed_images_dir.mkdir(parents=True, exist_ok=True)
-        labels_dir.mkdir(parents=True, exist_ok=True)
-
-    # Inicializar variables para el seguimiento de las detecciones
+        labels_dir.mkdir(parents=True, exist_ok=True)  # Crear directorio de labels
+    
     image_examples = []
     total_confidence_ranges = {
         '0-10': {'correct': 0, 'incorrect': 0},
@@ -314,114 +329,54 @@ def test(data,
         '80-90': {'correct': 0, 'incorrect': 0},
         '90-100': {'correct': 0, 'incorrect': 0}
     }
-    
+
     for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
         img = img.to(device, non_blocking=True)
-        if not isinstance(model, onnxruntime.InferenceSession):
-            img = img.half() if half else img.float()  # uint8 to fp16/32
-            img /= 255.0  # 0 - 255 to 0.0 - 1.0
-        else:
-
-            img = img.cpu().numpy()  # Mover a la CPU antes de convertir a NumPy
-
-            # Redimensionar la imagen al tamaño esperado
-            expected_size = (imgsz,imgsz) 
-            resized_images = []
-            # Iterar sobre todas las imágenes en el batch
-            for i in range(img.shape[0]):  # Iterar sobre el batch (batch_size)
-                single_img = img[i]  # Extraer la imagen i
-
-                # Si la imagen está en formato (C, H, W), transpónlo a (H, W, C)
-                if single_img.shape[0] == 3:
-                    single_img = single_img.transpose(1, 2, 0)
-
-                # Verificar que la imagen tiene exactamente 3 dimensiones antes de redimensionar
-                if len(single_img.shape) != 3:
-                    raise ValueError(f"Error: La imagen en el batch tiene una forma inesperada: {single_img.shape}")
-
-                # Redimensionar la imagen
-                resized_img = cv2.resize(single_img, expected_size, interpolation=cv2.INTER_LINEAR)
-                
-                # Agregar la imagen redimensionada a la lista
-                resized_images.append(resized_img)
-
-            # Convertir la lista de imágenes redimensionadas a un array NumPy con batch
-            img = np.array(resized_images)
-            img = img.transpose(0, 3, 1, 2)  # Transponer a (C, H, W) para ONNX
-
-            img = img.astype(np.float32) / 255.0
+        img = img.half() if half else img.float()  # uint8 to fp16/32
+        img /= 255.0  # 0 - 255 to 0.0 - 1.0
         targets = targets.to(device)
-
         nb, _, height, width = img.shape  # batch size, channels, height, width
 
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            if isinstance(model, onnxruntime.InferenceSession):
-                print(f"\nONNX Input shape: {img.shape}")
-                input_name = model.get_inputs()[0].name
-                output_names = [output.name for output in model.get_outputs()]
-                print(f"Input name: {input_name}")
-                print(f"Output names: {output_names}")
-                
-                try:
-                    # Run inference
-                    ort_outs = model.run(output_names, {input_name: img})
-                    print(f"ONNX output length: {len(ort_outs)}")
-                    print(f"ONNX output shapes: {[o.shape for o in ort_outs]}")
-                    
-                    # Convert output to torch tensor
-                    out = torch.from_numpy(ort_outs[0]).to(device)
-                    print(f"Converted output shape: {out.shape}")
-                    train_out = None  # No training outputs in ONNX
-                except Exception as e:
-                    print(f"Error in ONNX inference: {e}")
-                    raise
-            else:
-                # PyTorch inference
-                out, train_out = model(img, augment=augment)
-            
+            out, train_out = model(img, augment=augment)  # inference and training outputs
             t0 += time_synchronized() - t
 
-            # Compute loss (skip for ONNX)
-            if compute_loss and not isinstance(model, onnxruntime.InferenceSession):
-                loss += compute_loss([x.float() for x in train_out], targets)[1][:3]
-                # Run NMS
+            # Compute loss
+            if compute_loss:
+                loss += compute_loss([x.float() for x in train_out], targets)[1][:3]  # box, obj, cls
+
+            # Run NMS
             targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
             lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
             t = time_synchronized()
-            if is_onnx:
-                out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
-            else:
-                out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
-                
+            out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
             t1 += time_synchronized() - t
 
-        # Contar predicciones totales
+            # Contar predicciones totales
             for det in out:
                 total_predictions += len(det)
 
-        # Dentro del bucle principal, después de procesar las predicciones
+        # Statistics per image
         for si, pred in enumerate(out):
-
+            # Cargar imagen original usando cv2 directamente
             im0s = cv2.imread(str(paths[si]))
             if im0s is None:
                 logging.error(f"Error loading image: {paths[si]}")
                 continue
-
+            
             labels = targets[targets[:, 0] == si, 1:]
             nl = len(labels)
             tcls = labels[:, 0].tolist() if nl else []  # target class
             path = Path(paths[si])
             seen += 1
 
+            # PRIMERO: Procesar todas las predicciones y guardar sus áreas
             prediction_boxes = []
             if len(pred):
-                # Scale coordinates
                 predn = pred.clone()
                 scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])
-
-                # Para cada predicción, verificar IoU con ground truth
                 for *xyxy, conf, cls in predn:
                     try:
                         box = [int(x.item()) for x in xyxy]
@@ -434,6 +389,7 @@ def test(data,
                         logging.error(f"Error al procesar predicción: {e}")
                         continue
 
+            # SEGUNDO: Procesar ground truth y marcar cuáles tienen solapamiento
             matched_gt = set()
             if nl:
                 tbox = xywh2xyxy(labels[:, 1:5])
@@ -448,7 +404,7 @@ def test(data,
                         
                         # Verificar solapamiento con cualquier predicción
                         for pred_info in prediction_boxes:
-                            if calculate_iou(gt_box, pred_info['box']) > iou_thres:
+                            if calculate_iou(gt_box, pred_info['box']) > 0.5:
                                 matched_gt.add(i)
                                 break
                         
@@ -462,25 +418,30 @@ def test(data,
             # TERCERO: Procesar y dibujar predicciones
             if len(pred):
                 # Guardar predicciones en archivo .txt
-                if output_dir:
+                if labels_dir:  # Solo guardar si labels_dir existe
                     txt_path = labels_dir / f"{Path(path).stem}.txt"
                     with open(txt_path, "w") as f:
                         for *xyxy, conf, cls in predn:
-                            # Convertir bbox a formato normalizado
-                            x1, y1, x2, y2 = [float(x) for x in xyxy]
-                            w = (x2 - x1) / im0s.shape[1]
-                            h = (y2 - y1) / im0s.shape[0]
-                            x_center = ((x1 + x2) / 2) / im0s.shape[1]
-                            y_center = ((y1 + y2) / 2) / im0s.shape[0]
-                            
-                            f.write(f"{int(cls)} {x_center:.6f} {y_center:.6f} {w:.6f} {h:.6f} {conf:.6f}\n")
+                            try:
+                                # Convertir bbox a formato normalizado usando list comprehension
+                                x1, y1, x2, y2 = [float(x) for x in xyxy]
+                                w = (x2 - x1) / im0s.shape[1]  # Normalizar por ancho de imagen
+                                h = (y2 - y1) / im0s.shape[0]  # Normalizar por alto de imagen
+                                x_center = ((x1 + x2) / 2) / im0s.shape[1]
+                                y_center = ((y1 + y2) / 2) / im0s.shape[0]
+                                
+                                # Escribir en formato YOLO
+                                f.write(f"{int(cls)} {x_center:.6f} {y_center:.6f} {w:.6f} {h:.6f} {conf:.6f}\n")
+                            except Exception as e:
+                                logging.error(f"Error al procesar detección: {e}")
+                                continue
 
-                # Procesar y dibujar cada detección
+                # Continuar con el procesamiento de visualización
                 for *xyxy, conf, cls in predn:
                     cls = int(cls)
                     is_correct = False
 
-                    # Verificar IoU con ground truth
+                    # Verificar si la detección coincide con ground truth
                     if nl:
                         xyxy_tensor = torch.tensor(xyxy, device=device).unsqueeze(0)
                         tbox = tbox.to(device)
@@ -488,22 +449,14 @@ def test(data,
                         max_iou, _ = box_gt.max(1)
                         is_correct = max_iou > iou_thres
 
-                    # Dibujar caja según si es correcta o no
+                    # Dibujar caja según corrección
                     bgr_color = (colors[cls][2], colors[cls][1], colors[cls][0])
                     if not is_correct:
                         plot_striped_box(im0s, xyxy, bgr_color, (0,0,255), conf=conf)
                     else:
                         plot_one_box(xyxy, im0s, color=bgr_color, line_thickness=2)
-                # Guardar imagen procesada
-                if output_dir:
-                    save_path = processed_images_dir / f"{Path(paths[si]).stem}_processed.jpg"
-                    cv2.imwrite(str(save_path), im0s)
 
-                    # Almacenar ejemplo para reporte
-                    expected_classes = {int(l): len(labels[labels[:, 0] == l]) for l in labels[:, 0].unique()} if nl else {}
-                    detected_classes = {int(cls): len(pred[pred[:, 5] == cls]) for cls in pred[:, 5].unique()}
-                    image_examples.append((str(save_path), expected_classes, detected_classes))
-        # Predictions
+            # Predictions
             predn = pred.clone()
             scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # native-space pred
 
@@ -620,15 +573,16 @@ def test(data,
                                 total_confidence_ranges[range_key]['incorrect'] += 1
                             break
 
-                if output_dir:
-                    # Guardar imagen procesada
+                if output_dir:  # Guardar imagen procesada
                     save_path = processed_images_dir / f"{Path(paths[si]).stem}_processed.jpg"
                     cv2.imwrite(str(save_path), im0s)
                     
-                    # ELIMINAR ESTE BLOQUE DE CÓDIGO YA QUE ES DUPLICADO
-                    # expected_classes = {int(l): len(labels[labels[:, 0] == l]) for l in labels[:, 0].unique()} if nl else {}
-                    # detected_classes = {int(cls): len(pred[pred[:, 5] == cls]) for cls in pred[:, 5].unique()}
-                    # image_examples.append((str(save_path), expected_classes, detected_classes))
+                    # Almacenar ejemplo para reporte
+                    expected_classes = {int(l): len(labels[labels[:, 0] == l]) for l in labels[:, 0].unique()} if nl else {}
+                    detected_classes = {int(cls): len(pred[pred[:, 5] == cls]) for cls in pred[:, 5].unique()}
+                    
+                    # Solo agregar si aún no hemos alcanzado el límite
+                    image_examples.append((str(save_path), expected_classes, detected_classes))
 
         # Plot images
         if plots and batch_i < 3:
@@ -637,9 +591,8 @@ def test(data,
             f = save_dir / f'test_batch{batch_i}_pred.jpg'  # predictions
             Thread(target=plot_images, args=(img, output_to_target(out), paths, f, names), daemon=True).start()
 
-
-    stats = [np.concatenate(x, 0) for x in zip(*stats)] if stats else []
-
+    # Compute statistics
+    stats = [np.concatenate(x, 0) for x in zip(*stats)]  # to numpy
     if len(stats) and stats[0].any():
         p, r, ap, f1, ap_class = ap_per_class(*stats, plot=plots, v5_metric=v5_metric, save_dir=save_dir, names=names)
         ap50, ap = ap[:, 0], ap.mean(1)  # AP@0.5, AP@0.5:0.95
@@ -647,9 +600,6 @@ def test(data,
         nt = np.bincount(stats[3].astype(np.int64), minlength=nc)  # number of targets per class
     else:
         nt = torch.zeros(1)
-        mp, mr, map50, map = 0., 0., 0., 0.
-        p = r = ap50 = ap = np.array([0.])  # Inicializar arrays vacíos
-        ap_class = []  # Lista vacía para clases
 
     class_metrics = {}
 
@@ -663,24 +613,26 @@ def test(data,
         logging.info('\nMétricas por Clase:')
         for i, c in enumerate(ap_class):
             logging.info(pf % (names[c], seen, nt[c], p[i], r[i], ap50[i], ap[i]))
-            # Guardar métricas en el diccionario
+
+                # Guardar métricas en el diccionario
             class_metrics[names[c]] = {
-                "precision": float(p[i]),  # Convertir a float para asegurar serialización
-                "recall": float(r[i]),
-                "map@0.5": float(ap50[i]),
-                "map@0.5:0.95": float(ap[i]),
+                "precision": p[i],
+                "recall": r[i],
+                "map@0.5": ap50[i],
+                "map@0.5:0.95": ap[i],
                 "class_name": names[c],
             }
 
-    # Asegurarse de que tenemos al menos las métricas globales
-    if not class_metrics:
-        class_metrics["all"] = {
-            "precision": float(mp),
-            "recall": float(mr),
-            "map@0.5": float(map50),
-            "map@0.5:0.95": float(map),
-            "class_name": "all",
-        }
+    # Añadir contadores de imágenes y predicciones
+    total_images = len(dataloader.dataset)
+    total_processed = seen
+
+    dataset_stats = {
+        'total_images': total_images,
+        'processed_images': total_processed,
+        'total_labels': int(nt.sum()),
+        'total_predictions': total_predictions
+    }
 
     # Print speeds
     t = tuple(x / seen * 1E3 for x in (t0, t1, t0 + t1)) + (imgsz, imgsz, batch_size)  # tuple
@@ -719,26 +671,16 @@ def test(data,
             eval.summarize()
             map, map50 = eval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
         except Exception as e:
-            logging.info(f'pycocotools unable to run: {e}')
-
-    # Añadir contadores de imágenes
-    total_images = len(dataloader.dataset)  # Total de imágenes en el dataset
-    total_processed = seen  # Imágenes procesadas
-
-    # Añadir el conteo a las métricas de retorno
-    dataset_stats = {
-        'total_images': total_images,
-        'processed_images': total_processed,
-        'total_labels': int(nt.sum()),
-        'total_predictions': total_predictions  # Nueva métrica
-    }
+            logging.error(f'pycocotools unable to run: {e}')
 
     # Generar reporte
+    print(output_dir)
     if output_dir:
-        from object_detection_cellsia.report import generate_pdf_with_front_page
-        out = Path(output_dir) / f"{key}_onnx_report.pdf"
+        print("ESTOY AQUI")
+        out = Path(output_dir) / f"{key}_pt_report.pdf"
         
-        # Convertir metrics a dict        
+
+        # Convertir metrics de tuple a dict        
         metrics_dict = {
             "precision": mp,
             "recall": mr,
@@ -752,32 +694,188 @@ def test(data,
             pdf_path=str(out),
             model_name=model_name,
             data_name=key,
-            metrics=metrics_dict,
+            metrics=metrics_dict,  # Pass metrics as dictionary
             class_names=names,
-            image_examples=image_examples if 'image_examples' in locals() else [],
-            class_colors=colors if 'colors' in locals() else {},
+            image_examples=image_examples,
+            class_colors=colors,
             metrics_classes=class_metrics,
             dataset_stats=dataset_stats,
-            confidence_ranges=total_confidence_ranges if 'total_confidence_ranges' in locals() else {}
+            confidence_ranges=total_confidence_ranges,
+            conf_thres = conf_thres,
+            iou_thres = iou_thres
         )
 
     # Return results
-  # for training
+    model.float()  # for training
     if not training:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
         logging.info(f"Results saved to {save_dir}{s}")
     maps = np.zeros(nc) + map
     for i, c in enumerate(ap_class):
         maps[c] = ap[i]
-    return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t, class_metrics, dataset_stats
+    return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t, class_metrics, dataset_stats, image_examples, total_confidence_ranges
+
+def run_validation_sweep(data, weights, batch_size, img_size, iou_thres, save_json, single_cls, 
+                        augment, verbose, save_txt=False, save_hybrid=False, save_conf=False, 
+                        trace=True, v5_metric=False, output_dir=None, key='val'):
+    """
+    Ejecuta la validación con diferentes umbrales de confianza y retorna los mejores resultados
+    """
+    # Add debug logging for output_dir
+    logging.info(f"run_validation_sweep() called with output_dir: {output_dir}")
+    
+    # Cambiar el rango de umbrales de confianza para usar solo valores entre 0.3 y 0.9
+    confidence_thresholds = np.arange(0.3, 1.0, 0.1)  # Generará [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    
+    # Inicializar variables que necesitamos mantener entre iteraciones
+    results = []
+    best_f1 = -1
+    best_conf = None
+    best_metrics = None
+    best_maps = None
+    best_t = None
+    best_class_metrics = None
+    best_dataset_stats = None
+    global_names = None  # Nueva variable para almacenar names
+    global_colors = None  # Nueva variable para almacenar colors
+    global_image_examples = None  # Nueva variable para almacenar image_examples
+    best_total_confidence_ranges = None  # Add this variable
+
+    # Force model to CPU at load time
+    model = attempt_load(weights, map_location='cpu')
+
+    # ...existing code until first test call...
+    for conf_thres in confidence_thresholds:
+        print(f"\nTesting with confidence threshold: {conf_thres:.1f}")
+        metrics, maps, t, class_metrics, dataset_stats, image_examples, conf_ranges = test(  # Add conf_ranges to unpacking
+            data, weights, batch_size, img_size, 
+            conf_thres=conf_thres, 
+            iou_thres=iou_thres,
+            save_json=save_json,
+            single_cls=single_cls,
+            augment=augment,
+            verbose=verbose,
+            save_txt=save_txt,
+            save_hybrid=save_hybrid,
+            save_conf=save_conf,
+            trace=False,
+            v5_metric=v5_metric,
+            output_dir=output_dir,  # Pasar output_dir aquí
+            key=key
+        )
+        
+        # Guardamos los nombres y colores de la primera ejecución
+        if global_names is None:
+            # Acceder a las variables globales definidas en test()
+            global opt
+            model = attempt_load(weights, map_location='cpu')
+            global_names = {k: v for k, v in enumerate(model.names if hasattr(model, 'names') else model.module.names)}
+            
+            # Generar colores
+            nc = 1 if single_cls else int(model.nc)
+            global_colors = {}
+            used_colors = set()
+            for i in range(nc):
+                color = get_random_color(used_colors)
+                global_colors[i] = color
+                used_colors.add(color)
+        
+        # Calcular F1 score y actualizar mejor resultado
+        p, r = metrics[0], metrics[1]
+        f1 = 2 * (p * r) / (p + r) if (p + r) > 0 else 0
+        
+        results.append({
+            'conf_thres': conf_thres,
+            'metrics': metrics,
+            'f1': f1
+        })
+        
+        if f1 > best_f1:
+            best_f1 = f1
+            best_conf = conf_thres
+            best_metrics = metrics
+            best_maps = maps
+            best_t = t
+            best_class_metrics = class_metrics
+            best_dataset_stats = dataset_stats
+            global_image_examples = image_examples  # Guardar los ejemplos del mejor resultado
+            best_total_confidence_ranges = conf_ranges  # Store best confidence ranges
+
+    # Ejecutar última vez con la mejor confianza
+    if output_dir:
+        print(f"\nRunning final test with best confidence threshold: {best_conf:.1f}")
+        # Ejecutar una vez más con la mejor confianza para guardar resultados finales
+        metrics, maps, t, class_metrics, dataset_stats, image_examples, conf_ranges = test(
+            data, weights, batch_size, img_size, 
+            conf_thres=best_conf,  # Usar el mejor umbral de confianza
+            iou_thres=iou_thres,
+            save_json=save_json,
+            single_cls=single_cls,
+            augment=augment,
+            verbose=verbose,
+            save_txt=save_txt,
+            save_hybrid=save_hybrid,
+            save_conf=save_conf,
+            trace=False,
+            v5_metric=v5_metric,
+            output_dir=output_dir,  # Aquí sí guardamos los resultados finales
+            key=key
+        )
+        
+        best_class_metrics = class_metrics
+        best_dataset_stats = dataset_stats
+        global_image_examples = image_examples  # Actualizar con ejemplos más recientes
+        best_total_confidence_ranges = conf_ranges
+
+        # Ordenar resultados por umbral de confianza
+        results.sort(key=lambda x: x['conf_thres'])
+        
+        # Generar reporte con todas las métricas
+        out = Path(output_dir) / f"{key}_pt_report.pdf"
+        metrics_dict = {
+            "precision": best_metrics[0],
+            "recall": best_metrics[1],
+            "map@0.5": best_metrics[2],
+            "map@0.5:0.95": best_metrics[3],
+            "loss": best_metrics[4:] if len(best_metrics) > 4 else None,
+            "times": best_t
+        }
+        
+        generate_pdf_with_front_page(
+            pdf_path=str(out),
+            model_name=str(data).split('/')[2],
+            data_name=key,
+            metrics=metrics_dict,
+            class_names=global_names,  # Usar nombres guardados
+            image_examples=global_image_examples,  # Usar ejemplos guardados
+            class_colors=global_colors,  # Usar colores guardados
+            metrics_classes=best_class_metrics,
+            dataset_stats=best_dataset_stats,
+            confidence_ranges=best_total_confidence_ranges,  # Use the stored best ranges
+            conf_thres=best_conf,
+            iou_thres=iou_thres,
+            all_metrics=results
+        )
+
+    return results, best_conf, (best_metrics, best_maps, best_t, best_class_metrics, best_dataset_stats)
 
 if __name__ == '__main__':
+    # Configurar logging al inicio
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),  # Para mostrar en consola
+            logging.FileHandler('detection.log')  # Para guardar en archivo
+        ]
+    )
+    
     parser = argparse.ArgumentParser(prog='test.py')
     parser.add_argument('--weights', nargs='+', type=str, default='yolov7.pt', help='model.pt path(s)')
     parser.add_argument('--data', type=str, default='data/coco.yaml', help='*.data path')
     parser.add_argument('--batch-size', type=int, default=32, help='size of each image batch')
     parser.add_argument('--img-size', type=int, default=1024, help='inference size (pixels)')
-    parser.add_argument('--conf-thres', type=float, default=0.25, help='object confidence threshold')
+    parser.add_argument('--conf-thres', type=float, default=0.05, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
     parser.add_argument('--task', default='val', help='train, val, test, speed or study')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
@@ -796,36 +894,102 @@ if __name__ == '__main__':
     
     # Añadir nuevos argumentos para el guardado de imágenes y reporte
     parser.add_argument('--output-dir', type=str, help='directorio para guardar resultados')
-    parser.add_argument('--save-images', action='store_true', help='guardar imágenes con detecciones')
-    parser.add_argument('--save-report', action='store_true', help='generar reporte PDF')
+    parser.add_argument('--save-images', action='store_true', help='guardar imágenes con detecciones')  # Corregido aquí
+    parser.add_argument('--save-report', action='store_true', help='generar reporte PDF')  # Corregido aquí
     parser.add_argument('--max-examples', type=int, default=20, help='número máximo de ejemplos en el reporte')
 
     opt = parser.parse_args()
     opt.save_json |= opt.data.endswith('coco.yaml')
     opt.data = check_file(opt.data)  # check file
+    logging.info(opt)
     #check_requirements()
 
-    if opt.task in ('train', 'val', 'test'):  # run normally
-        test(opt.data,
-             opt.weights,
-             opt.batch_size,
-             opt.img_size,
-             opt.conf_thres,
-             opt.iou_thres,
-             opt.save_json,
-             opt.single_cls,
-             opt.augment,
-             opt.verbose,
-             save_txt=opt.save_txt | opt.save_hybrid,
-             save_hybrid=opt.save_hybrid,
-             save_conf=opt.save_conf,
-             trace=not opt.no_trace,
-             v5_metric=opt.v5_metric,
-             output_dir=opt.output_dir if (opt.save_images or opt.save_report) else None,
-             key=opt.task
-             )
+    # Nueva secuencia de validación
+    logging.info("\n=== Starting validation sequence ===")
 
-    elif opt.task == 'speed':  # speed benchmarks
+    # 1. Validation set validation sweep para encontrar mejor conf_thres
+    logging.info("\n[1/3] Running validation sweep on validation set...")
+    val_results, best_conf, val_best_metrics = run_validation_sweep(
+        opt.data,
+        opt.weights,
+        opt.batch_size,
+        opt.img_size,
+        opt.iou_thres,
+        opt.save_json,
+        opt.single_cls,
+        opt.augment,
+        opt.verbose,
+        save_txt=opt.save_txt | opt.save_hybrid,
+        save_hybrid=opt.save_hybrid,
+        save_conf=opt.save_conf,
+        trace=False,
+        v5_metric=opt.v5_metric,
+        output_dir=opt.output_dir,  # Remove conditional
+        key='val'
+    )
+
+    logging.info(f"\nBest confidence threshold from validation: {best_conf:.3f}")
+
+    # 2. Evaluate on train set with best confidence
+    logging.info("\n[2/3] Evaluating on training set with best confidence...")
+    train_metrics = test(
+        opt.data,
+        opt.weights,
+        opt.batch_size,
+        opt.img_size,
+        conf_thres=best_conf,
+        iou_thres=opt.iou_thres,
+        save_json=opt.save_json,
+        single_cls=opt.single_cls,
+        augment=opt.augment,
+        verbose=opt.verbose,
+        save_txt=opt.save_txt | opt.save_hybrid,
+        save_hybrid=opt.save_hybrid,
+        save_conf=opt.save_conf,
+        trace=False,
+        v5_metric=opt.v5_metric,
+        output_dir=opt.output_dir,  # Remove conditional
+        key='train'
+    )
+
+    # 3. Evaluate on test set with best confidence
+    logging.info("\n[3/3] Evaluating on test set with best confidence...")
+    test_metrics = test(
+        opt.data,
+        opt.weights,
+        opt.batch_size,
+        opt.img_size,
+        conf_thres=best_conf,
+        iou_thres=opt.iou_thres,
+        save_json=opt.save_json,
+        single_cls=opt.single_cls,
+        augment=opt.augment,
+        verbose=opt.verbose,
+        save_txt=opt.save_txt | opt.save_hybrid,
+        save_hybrid=opt.save_hybrid,
+        save_conf=opt.save_conf,
+        trace=False,
+        output_dir=opt.output_dir,  # Remove conditional
+        key='test'
+    )
+
+    # Imprimir resumen final
+    logging.info("\n=== Final Results Summary ===")
+    logging.info(f"\nBest confidence threshold (from validation): {best_conf:.3f}")
+    
+    logging.info("\nTrain Set Results:")
+    logging.info(f"mAP@.5: {train_metrics[0][2]:.3f}")
+    logging.info(f"mAP@.5:.95: {train_metrics[0][3]:.3f}")
+
+    logging.info("\nValidation Set Best Results:")
+    logging.info(f"mAP@.5: {val_best_metrics[0][2]:.3f}")
+    logging.info(f"mAP@.5:.95: {val_best_metrics[0][3]:.3f}")
+
+    logging.info("\nTest Set Results:")
+    logging.info(f"mAP@.5: {test_metrics[0][2]:.3f}")
+    logging.info(f"mAP@.5:.95: {test_metrics[0][3]:.3f}")
+
+    if opt.task == 'speed':  # speed benchmarks
         for w in opt.weights:
             test(opt.data, w, opt.batch_size, opt.img_size, 0.25, 0.45, save_json=False, plots=False, v5_metric=opt.v5_metric)
 

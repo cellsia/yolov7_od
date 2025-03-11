@@ -33,13 +33,10 @@ from report import generate_pdf_with_front_page
 
 
 def load_model(weights, device):
-    #device = select_device(device)
+    device = select_device(device)
 
-    print(f"Dispositivo recibido en load_model: {device}")
-
-    session = ort.InferenceSession(weights, providers=["CUDAExecutionProvider" if "cuda" in device else "CPUExecutionProvider"])
-    #providers=["CUDAExecutionProvider" if device.type != 'cpu' else "CPUExecutionProvider"])
-    
+    session = ort.InferenceSession(weights, 
+                                providers=["CUDAExecutionProvider" if device.type != 'cpu' else "CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
     output_name = session.get_outputs()[0].name
     print("Modelo cargado .onnx y dispositivo configurado.")
@@ -47,7 +44,7 @@ def load_model(weights, device):
 
 def is_forbidden_color(color):
     """
-    Comprueba si un color RGB está en el rango de rojos, rosas, morados, grises o verdes.
+    Comprueba si un color RGB está en el rango de rojos, rosas, morados o grises.
     """
     r, g, b = color
     
@@ -63,10 +60,7 @@ def is_forbidden_color(color):
     # Detectar grises (diferencia entre canales menor a 30)
     is_grey = abs(r - g) < 30 and abs(g - b) < 30 and abs(r - b) < 30
     
-    # Detectar verdes (G alto, R y B bajos)
-    is_green = g > 150 and r < 100 and b < 100
-    
-    return is_red or is_pink or is_purple or is_grey or is_green
+    return is_red or is_pink or is_purple or is_grey
 
 def get_names_colors(data_config):
     with open(data_config, 'r') as f:
@@ -179,30 +173,17 @@ def realizar_inferencia(img, session, input_name, output_name, conf_thres, iou_t
     pred = non_max_suppression(preds, conf_thres, iou_thres, classes=classes, agnostic=agnostic_nms)
     return pred
 
-def plot_striped_box(img, xyxy, color1, color2, conf=None, line_thickness=2, stripe_length=10):
+def plot_striped_box(img, xyxy, color1, color2, conf=None, line_thickness=2, corner_length=20):
     """
-    Dibuja una caja con el patrón de rayas alternadas en la línea superior
-    color1: color de la clase (BGR)
-    color2: color rojo para las rayas (BGR)
+    Dibuja una caja del color de la clase con la línea superior en rojo y muestra la confianza en negrita
     """
     x1, y1, x2, y2 = map(int, xyxy)
     
-    # Dibujar los tres lados completos con el color de la clase
-    cv2.line(img, (x1, y2), (x2, y2), color1, line_thickness)  # línea inferior
-    cv2.line(img, (x1, y1), (x1, y2), color1, line_thickness)  # línea izquierda
-    cv2.line(img, (x2, y1), (x2, y2), color1, line_thickness)  # línea derecha
+    # Dibujar el recuadro completo con el color de la clase
+    cv2.rectangle(img, (x1, y1), (x2, y2), color1, line_thickness)
     
-    # Dibujar la línea superior con patrón de rayas
-    total_length = x2 - x1
-    current_x = x1
-    is_color1 = False  # Empezar con rojo
-    
-    while current_x < x2:
-        end_x = min(current_x + stripe_length, x2)
-        color = color2 if not is_color1 else color1
-        cv2.line(img, (current_x, y1), (end_x, y1), color, line_thickness)
-        current_x = end_x
-        is_color1 = not is_color1
+    # Dibujar solo la línea superior en rojo
+    cv2.line(img, (x1, y1), (x2, y1), color2, line_thickness)
     
     # Añadir texto de confianza si se proporciona
     if conf is not None:
@@ -210,19 +191,21 @@ def plot_striped_box(img, xyxy, color1, color2, conf=None, line_thickness=2, str
         conf_str = f"{conf:.2f}"
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.5
-        font_thickness = 2
+        font_thickness = 2  # Aumentado de 1 a 2 para texto en negrita
         
+        # Obtener dimensiones del texto
         (text_width, text_height), baseline = cv2.getTextSize(conf_str, font, font_scale, font_thickness)
         
+        # Calcular posición del texto (sobre el recuadro)
         margin = 2
         text_x = x1
-        text_y = y1 - margin
+        text_y = y1 - margin  # Justo encima del recuadro
         
-        # Dibujar fondo del texto
+        # Dibujar fondo del texto para mejor visibilidad
         cv2.rectangle(img, 
                      (text_x, text_y - text_height - margin),
                      (text_x + text_width + margin * 2, text_y + margin),
-                     color2, -1)
+                     color2, -1)  # -1 para rellenar
         
         # Dibujar texto
         cv2.putText(img, conf_str, (text_x + margin, text_y - margin), 
@@ -260,44 +243,13 @@ def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_ima
     detected_classes = {}
     detecciones_procesadas = False
     confidence_ranges = {
-        '0-10': {'correct': 0, 'incorrect': 0},
-        '10-20': {'correct': 0, 'incorrect': 0},
-        '20-30': {'correct': 0, 'incorrect': 0},
-        '30-40': {'correct': 0, 'incorrect': 0},
-        '40-50': {'correct': 0, 'incorrect': 0},
-        '50-60': {'correct': 0, 'incorrect': 0},
-        '60-70': {'correct': 0, 'incorrect': 0},
-        '70-80': {'correct': 0, 'incorrect': 0},
-        '80-90': {'correct': 0, 'incorrect': 0},
-        '90-100': {'correct': 0, 'incorrect': 0}
+        '0-10': 0, '10-20': 0, '20-30': 0, '30-40': 0,
+        '40-50': 0, '50-60': 0, '60-70': 0, '70-80': 0,
+        '80-90': 0, '90-100': 0
     }
     iou_threshold = 0.5  # Definimos el umbral de IoU aquí
 
     with open(txt_path, "w") as f:
-        # Primero dibujamos las cajas ground truth no detectadas en verde
-        matched_boxes = set()
-        
-        # Procesar detecciones primero para marcar las coincidencias
-        if len(pred[0]):
-            det = pred[0]
-            det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0s.shape).round()
-            for *xyxy, conf, cls in reversed(det):
-                predicted_class = int(cls)
-                detected_box = tuple(map(int, xyxy))
-                
-                if predicted_class in expected_classes_coordinates:
-                    for idx, gt_box in enumerate(expected_classes_coordinates[predicted_class]):
-                        if idx not in matched_boxes and calculate_iou(detected_box, gt_box) >= iou_threshold:
-                            matched_boxes.add((predicted_class, idx))
-                            break
-        
-        # Dibujar cajas ground truth no detectadas en verde
-        for class_id, boxes in expected_classes_coordinates.items():
-            for idx, box in enumerate(boxes):
-                if (class_id, idx) not in matched_boxes:
-                    x_min, y_min, x_max, y_max = map(int, box)
-                    cv2.rectangle(im0s, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-
         for i, det in enumerate(pred):
             if len(det):
                 print(f" - Detecciones encontradas: {len(det)}")
@@ -340,23 +292,20 @@ def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_ima
 
                     if is_correct:
                         plot_one_box(xyxy, im0s, color=bgr_color, line_thickness=2)
-                    else:
-                        plot_striped_box(im0s, xyxy, bgr_color, red_color, conf, line_thickness=2, stripe_length=20)
+                    else:                        plot_striped_box(im0s, xyxy, bgr_color, red_color, conf, line_thickness=2, corner_length=20)
 
                     # Debug print
                     print(f"Clase {predicted_class}: {'correcta' if is_correct else 'incorrecta'} "
                           f"(IoU máximo: {iou if 'iou' in locals() else 0:.3f})")
 
-                    # Categorizar la confianza en rangos
-                    conf_value = float(conf) * 100  # Convertir a porcentaje
-                    for range_key in confidence_ranges.keys():
-                        min_val, max_val = map(int, range_key.split('-'))
-                        if min_val <= conf_value < max_val:
-                            if is_correct:
-                                confidence_ranges[range_key]['correct'] += 1
-                            else:
-                                confidence_ranges[range_key]['incorrect'] += 1
-                            break
+                    if not is_correct:
+                        # Categorizar la confianza en rangos
+                        conf_value = float(conf) * 100  # Convertir a porcentaje
+                        for range_key in confidence_ranges.keys():
+                            min_val, max_val = map(int, range_key.split('-'))
+                            if min_val <= conf_value < max_val:
+                                confidence_ranges[range_key] += 1
+                                break
 
         # Guardar la imagen procesada con detecciones
         processed_img_path = processed_images_dir / f"{Path(path).stem}_processed.jpg"
@@ -376,16 +325,9 @@ def main(input_dir, session, input_name, output_name, img_size, conf_thres, iou_
     image_examples = []
 
     total_confidence_ranges = {
-        '0-10': {'correct': 0, 'incorrect': 0},
-        '10-20': {'correct': 0, 'incorrect': 0},
-        '20-30': {'correct': 0, 'incorrect': 0},
-        '30-40': {'correct': 0, 'incorrect': 0},
-        '40-50': {'correct': 0, 'incorrect': 0},
-        '50-60': {'correct': 0, 'incorrect': 0},
-        '60-70': {'correct': 0, 'incorrect': 0},
-        '70-80': {'correct': 0, 'incorrect': 0},
-        '80-90': {'correct': 0, 'incorrect': 0},
-        '90-100': {'correct': 0, 'incorrect': 0}
+        '0-10': 0, '10-20': 0, '20-30': 0, '30-40': 0,
+        '40-50': 0, '50-60': 0, '60-70': 0, '70-80': 0,
+        '80-90': 0, '90-100': 0
     }
 
     for img_path in image_paths:
@@ -446,8 +388,7 @@ def main(input_dir, session, input_name, output_name, img_size, conf_thres, iou_
 
         # Acumular los conteos de rangos de confianza
         for range_key in conf_ranges:
-            total_confidence_ranges[range_key]['correct'] += conf_ranges[range_key]['correct']
-            total_confidence_ranges[range_key]['incorrect'] += conf_ranges[range_key]['incorrect']
+            total_confidence_ranges[range_key] += conf_ranges[range_key]
 
     test_onnx.opt = Opt(key)
 
@@ -525,8 +466,6 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    #device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-
 
     input_dir_path = Path(args.input_dir)
     if not input_dir_path.is_dir():

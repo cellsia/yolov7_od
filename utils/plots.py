@@ -398,41 +398,68 @@ def plot_results_overlay(start=0, stop=0):  # from utils.plots import *; plot_re
 
 
 def plot_results(start=0, stop=0, bucket='', id=(), labels=(), save_dir=''):
-    # Plot training 'results*.txt'. from utils.plots import *; plot_results(save_dir='runs/train/exp')
-    fig, ax = plt.subplots(2, 5, figsize=(12, 6), tight_layout=True)
-    ax = ax.ravel()
-    s = ['Box', 'Objectness', 'Classification', 'Precision', 'Recall',
-         'val Box', 'val Objectness', 'val Classification', 'mAP@0.5', 'mAP@0.5:0.95']
-    if bucket:
-        # files = ['https://storage.googleapis.com/%s/results%g.txt' % (bucket, x) for x in id]
-        files = ['results%g.txt' % x for x in id]
-        c = ('gsutil cp ' + '%s ' * len(files) + '.') % tuple('gs://%s/results%g.txt' % (bucket, x) for x in id)
-        os.system(c)
-    else:
-        files = list(Path(save_dir).glob('results*.txt'))
-    assert len(files), 'No results.txt files found in %s, nothing to plot.' % os.path.abspath(save_dir)
-    for fi, f in enumerate(files):
-        try:
-            results = np.loadtxt(f, usecols=[2, 3, 4, 8, 9, 12, 13, 14, 10, 11], ndmin=2).T
-            n = results.shape[1]  # number of rows
-            x = range(start, min(stop, n) if stop else n)
-            for i in range(10):
-                y = results[i, x]
-                if i in [0, 1, 2, 5, 6, 7]:
-                    y[y == 0] = np.nan  # don't show zero loss values
-                    # y /= y[0]  # normalize
-                label = labels[fi] if len(labels) else f.stem
-                ax[i].plot(x, y, marker='.', label=label, linewidth=2, markersize=8)
-                ax[i].set_title(s[i])
-                # if i in [5, 6, 7]:  # share train and val loss y axes
-                #     ax[i].get_shared_y_axes().join(ax[i], ax[i - 5])
-        except Exception as e:
-            print('Warning: Plotting error for %s; %s' % (f, e))
+    try:
+        # Create figure
+        fig, ax = plt.subplots(2, 5, figsize=(12, 6), tight_layout=True)
+        ax = ax.ravel()
+        s = ['Box', 'Objectness', 'Classification', 'Precision', 'Recall',
+             'val Box', 'val Objectness', 'val Classification', 'mAP@0.5', 'mAP@0.5:0.95']
 
-    ax[1].legend()
-    fig.savefig(Path(save_dir) / 'results.png', dpi=200)
-    
-    
+        # Get files
+        files = ['results%g.txt' % x for x in id] if bucket else list(Path(save_dir).glob('results*.txt'))
+        assert len(files), f'No results.txt files found in {os.path.abspath(save_dir)}'
+
+        for fi, f in enumerate(files):
+            try:
+                # Load results
+                data = []
+                with open(f) as file:
+                    for line in file:
+                        try:
+                            # Split line and convert to float, skip if conversion fails
+                            values = [float(x) for x in line.strip().split()]
+                            if len(values) >= 15:  # Ensure enough columns
+                                data.append(values)
+                        except ValueError as ve:
+                            print(f'Skipping line in {f}: {line.strip()} - {str(ve)}')
+                            continue
+
+                if not data:
+                    print(f'No valid data found in {f}')
+                    continue
+
+                # Convert to numpy array and transpose
+                results = np.array(data)[:, [2, 3, 4, 8, 9, 12, 13, 14, 10, 11]].T
+                n = results.shape[1]
+                x = range(start, min(stop, n) if stop else n)
+
+                # Plot data
+                for i in range(10):
+                    if i >= results.shape[0]:
+                        continue
+                    y = results[i, x]
+                    if i in [0, 1, 2, 5, 6, 7]:
+                        y[y == 0] = np.nan
+                    label = labels[fi] if len(labels) else f.stem
+                    ax[i].plot(x, y, marker='.', label=label, linewidth=2, markersize=8)
+                    ax[i].set_title(s[i])
+
+            except Exception as e:
+                print(f'Warning: Plotting error for {f}: {str(e)}')
+                continue
+
+        # Finalize plot
+        if ax[1].get_lines():
+            ax[1].legend()
+        fig.savefig(Path(save_dir) / 'results.png', dpi=200)
+        plt.close(fig)
+
+    except Exception as e:
+        print(f'Warning: Plotting error: {str(e)}')
+    finally:
+        plt.close('all')
+
+
 def output_to_keypoint(output):
     # Convert model output to target format [batch_id, class_id, x, y, w, h, conf]
     targets = []

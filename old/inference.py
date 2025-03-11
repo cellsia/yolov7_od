@@ -15,7 +15,7 @@ import sys
 
 from Opt import Opt
 sys.path.append('/app/yolov7')
-import test_onnx as test_onnx
+import test_
 from models.experimental import attempt_load
 from utils.datasets import LoadStreams, LoadImages
 from utils.general import check_img_size, check_requirements, check_imshow, non_max_suppression, apply_classifier, \
@@ -31,23 +31,93 @@ from utils.general import scale_coords
 from utils.metrics import ap_per_class
 from report import generate_pdf_with_front_page
 
+def plot_striped_box(img, xyxy, color1, color2, conf=None, line_thickness=2, stripe_length=15):
+    """
+    Dibuja una caja con el patrón de rayas alternadas en la línea superior.
+    color1: color de la clase (BGR)
+    color2: color rojo para las rayas (BGR)
+    """
+    x1, y1, x2, y2 = map(int, xyxy)
+    
+    # Dibujar los tres lados completos con el color de la clase
+    cv2.line(img, (x1, y2), (x2, y2), color1, line_thickness)  # línea inferior
+    cv2.line(img, (x1, y1), (x1, y2), color1, line_thickness)  # línea izquierda
+    cv2.line(img, (x2, y1), (x2, y2), color1, line_thickness)  # línea derecha
+    
+    # Dibujar la línea superior con patrón de rayas alternadas
+    total_width = x2 - x1
+    current_x = x1
+    is_red = True  # Empezar con rojo
+    
+    while current_x < x2:
+        end_x = min(current_x + stripe_length, x2)
+        color = color2 if is_red else color1  # Alternar entre rojo y color de clase
+        cv2.line(img, (current_x, y1), (end_x, y1), color, line_thickness)
+        current_x = end_x
+        is_red = not is_red  # Cambiar color para el siguiente segmento
+    
+    # Añadir texto de confianza si se proporciona
+    if conf is not None:
+        conf_str = f"{conf:.2f}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        font_thickness = 2
+        
+        (text_width, text_height), baseline = cv2.getTextSize(conf_str, font, font_scale, font_thickness)
+        
+        margin = 2
+        text_x = x1
+        text_y = y1 - margin
+        
+        # Dibujar fondo del texto
+        cv2.rectangle(img, 
+                     (text_x, text_y - text_height - margin),
+                     (text_x + text_width + margin * 2, text_y + margin),
+                     color2, -1)
+        
+        # Dibujar texto
+        cv2.putText(img, conf_str, (text_x + margin, text_y - margin), 
+                    font, font_scale, (255, 255, 255), font_thickness)
 
 def load_model(weights, device):
-    #device = select_device(device)
+    """
+    Carga el modelo PyTorch y configura el dispositivo.
+    """
+    try:
+        if device == 'cuda':
+            if not torch.cuda.is_available():
+                print("CUDA no está disponible, usando CPU")
+                device = 'cpu'
+            else:
+                # Asegurarse de que el dispositivo es un string válido para select_device
+                n = torch.cuda.device_count()
+                if n > 0:
+                    # Usar el primer dispositivo CUDA disponible
+                    device = '0'
+                    print(f"Usando GPU 0 de {n} dispositivos disponibles")
+                else:
+                    device = 'cpu'
+                    print("No se encontraron dispositivos CUDA, usando CPU")
+    except Exception as e:
+        print(f"Error al configurar CUDA: {e}")
+        print("Usando CPU como fallback")
+        device = 'cpu'
 
-    print(f"Dispositivo recibido en load_model: {device}")
+    device = select_device(device)
+    print(f"Usando dispositivo: {device}")
 
-    session = ort.InferenceSession(weights, providers=["CUDAExecutionProvider" if "cuda" in device else "CPUExecutionProvider"])
-    #providers=["CUDAExecutionProvider" if device.type != 'cpu' else "CPUExecutionProvider"])
-    
-    input_name = session.get_inputs()[0].name
-    output_name = session.get_outputs()[0].name
-    print("Modelo cargado .onnx y dispositivo configurado.")
-    return session, input_name, output_name
+    model = attempt_load(weights, map_location=device)
+    half = device.type != 'cpu'
+
+    if half:
+        model.half()
+        
+    print("Modelo cargado .pt y dispositivo configurado.")
+    return model, half
 
 def is_forbidden_color(color):
     """
-    Comprueba si un color RGB está en el rango de rojos, rosas, morados, grises o verdes.
+    Comprueba si un color RGB está en el rango de rojos, rosas, morados o grises.
     """
     r, g, b = color
     
@@ -68,10 +138,8 @@ def is_forbidden_color(color):
     
     return is_red or is_pink or is_purple or is_grey or is_green
 
-def get_names_colors(data_config):
-    with open(data_config, 'r') as f:
-        data = yaml.safe_load(f)
-    names = data.get('names', []) 
+def get_names_colors(model):
+    names = model.module.names if hasattr(model, 'module') else model.names
     
     colors = {}
     for i in range(len(names)):
@@ -82,11 +150,6 @@ def get_names_colors(data_config):
                 break
     
     class_colors = {int(name): colors[i] for i, name in enumerate(names)}
-
-    print("Nombres de clases y colores configurados:")
-    print("Clases:", names)
-    print(class_colors)
-
     return names, class_colors
 
 def configurar_rutas(input_dir, output_dir, key):
@@ -96,7 +159,7 @@ def configurar_rutas(input_dir, output_dir, key):
     output_dir = Path(output_dir)
     dataset_dir = input_dir / "dataset"
     base_path = Path(dataset_dir)
-    save_dir = output_dir / "resultados" / "onnx"
+    save_dir = output_dir / "resultados" / "pt"
     save_dir.mkdir(parents=True, exist_ok=True)
     labels_dir = dataset_dir / "labels"
     print(f"Directorio de salida guardado configurado en: {save_dir}")
@@ -143,90 +206,28 @@ def leer_rutas_imagenes(base_path, txt_file_path):
     print(f"Se encontraron {len(image_paths)} rutas en el archivo .txt.")
     return image_paths
 
-def preprocesar_imagen(img, im0s, img_size):
+
+def preprocesar_imagen(img, device, half):
     """
-    Preprocesa una imagen para la inferencia en ONNX.
+    Preprocesa una imagen para la inferencia.
     """
-    expected_size = (img_size, img_size)
-
-    # Si la imagen está en formato (C, H, W), convertirla a (H, W, C)
-    if img.shape[0] == 3 and len(img.shape) == 3:
-        img = img.transpose(1, 2, 0)  # (C, H, W) → (H, W, C)
-        print(f"Imagen transpuesta a: {img.shape}")
-
-    if img is None:
-        raise ValueError("La imagen no se cargó correctamente.")
-
-    img = cv2.resize(img, expected_size, interpolation=cv2.INTER_LINEAR)
-
-    if img.shape[-1] != 3:
-        raise ValueError(f"La imagen tiene un número inesperado de canales: {img.shape}")
-
-    img = img.transpose(2, 0, 1)  # (H, W, C)
-
-    img = np.expand_dims(img, axis=0).astype(np.float32) / 255.0
-
+    img = torch.from_numpy(img).to(device)
+    img = img.half() if half else img.float()
+    img /= 255.0  # Normalizar
+    if img.ndimension() == 3:
+        img = img.unsqueeze(0)
     return img
 
-
-def realizar_inferencia(img, session, input_name, output_name, conf_thres, iou_thres, classes, agnostic_nms):
+def realizar_inferencia(model, img, augment, conf_thres, iou_thres, classes, agnostic_nms):
     """
     Realiza la inferencia en el modelo y aplica NMS.
     """
-    preds = session.run([output_name], {input_name: img})[0]
-    preds = torch.tensor(preds)  # Convertir a tensor
+    
+    with torch.no_grad():
+            preds = model(img, augment=augment)[0]
 
     pred = non_max_suppression(preds, conf_thres, iou_thres, classes=classes, agnostic=agnostic_nms)
     return pred
-
-def plot_striped_box(img, xyxy, color1, color2, conf=None, line_thickness=2, stripe_length=10):
-    """
-    Dibuja una caja con el patrón de rayas alternadas en la línea superior
-    color1: color de la clase (BGR)
-    color2: color rojo para las rayas (BGR)
-    """
-    x1, y1, x2, y2 = map(int, xyxy)
-    
-    # Dibujar los tres lados completos con el color de la clase
-    cv2.line(img, (x1, y2), (x2, y2), color1, line_thickness)  # línea inferior
-    cv2.line(img, (x1, y1), (x1, y2), color1, line_thickness)  # línea izquierda
-    cv2.line(img, (x2, y1), (x2, y2), color1, line_thickness)  # línea derecha
-    
-    # Dibujar la línea superior con patrón de rayas
-    total_length = x2 - x1
-    current_x = x1
-    is_color1 = False  # Empezar con rojo
-    
-    while current_x < x2:
-        end_x = min(current_x + stripe_length, x2)
-        color = color2 if not is_color1 else color1
-        cv2.line(img, (current_x, y1), (end_x, y1), color, line_thickness)
-        current_x = end_x
-        is_color1 = not is_color1
-    
-    # Añadir texto de confianza si se proporciona
-    if conf is not None:
-        # Configuración del texto
-        conf_str = f"{conf:.2f}"
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        font_thickness = 2
-        
-        (text_width, text_height), baseline = cv2.getTextSize(conf_str, font, font_scale, font_thickness)
-        
-        margin = 2
-        text_x = x1
-        text_y = y1 - margin
-        
-        # Dibujar fondo del texto
-        cv2.rectangle(img, 
-                     (text_x, text_y - text_height - margin),
-                     (text_x + text_width + margin * 2, text_y + margin),
-                     color2, -1)
-        
-        # Dibujar texto
-        cv2.putText(img, conf_str, (text_x + margin, text_y - margin), 
-                    font, font_scale, (255, 255, 255), font_thickness)
 
 def calculate_iou(box1, box2):
     """
@@ -252,7 +253,6 @@ def calculate_iou(box1, box2):
     iou = intersection / float(box1_area + box2_area - intersection)
     return iou
 
-
 def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_images_dir, path, image_examples, expected_classes, expected_classes_coordinates):
     """
     Procesa las detecciones, verificando IoU con las etiquetas reales.
@@ -271,7 +271,7 @@ def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_ima
         '80-90': {'correct': 0, 'incorrect': 0},
         '90-100': {'correct': 0, 'incorrect': 0}
     }
-    iou_threshold = 0.5  # Definimos el umbral de IoU aquí
+    iou_threshold = 0.5
 
     with open(txt_path, "w") as f:
         # Primero dibujamos las cajas ground truth no detectadas en verde
@@ -315,11 +315,13 @@ def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_ima
                     x_min, y_min, x_max, y_max = map(int, xyxy)
                     detected_box = (x_min, y_min, x_max, y_max)
 
-                    # Guardar en archivo .txt
+                    # Guardar coordenadas y detección
                     x_center = (x_min + x_max) / 2
                     y_center = (y_min + y_max) / 2
                     width = x_max - x_min
                     height = y_max - y_min
+                    
+                    # Guardar en archivo .txt
                     f.write(f"{predicted_class} {x_center / im0s.shape[1]:.6f} {y_center / im0s.shape[0]:.6f} "
                            f"{width / im0s.shape[1]:.6f} {height / im0s.shape[0]:.6f} {conf:.6f}\n")
 
@@ -334,18 +336,26 @@ def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_ima
                                     matched_gt_boxes.add(idx)
                                     break
 
-                    # Obtener colores y dibujar caja
-                    bgr_color = (colors[predicted_class][2], colors[predicted_class][1], colors[predicted_class][0])
-                    red_color = (0, 0, 255)
-
-                    if is_correct:
-                        plot_one_box(xyxy, im0s, color=bgr_color, line_thickness=2)
-                    else:
-                        plot_striped_box(im0s, xyxy, bgr_color, red_color, conf, line_thickness=2, stripe_length=20)
-
-                    # Debug print
+                    # Debug print como en inference_onnx
                     print(f"Clase {predicted_class}: {'correcta' if is_correct else 'incorrecta'} "
                           f"(IoU máximo: {iou if 'iou' in locals() else 0:.3f})")
+
+                    # Obtener color y convertir a BGR
+                    bgr_color = (colors[predicted_class][2], colors[predicted_class][1], colors[predicted_class][0])
+
+                    if not is_correct:
+                        # Actualizar rangos de confianza para predicciones incorrectas
+                        conf_value = float(conf) * 100
+                        for range_key in confidence_ranges.keys():
+                            min_val, max_val = map(int, range_key.split('-'))
+                            if min_val <= conf_value < max_val:
+                                confidence_ranges[range_key]['incorrect'] += 1
+                                break
+                        # Dibujar caja con línea roja y mostrar confianza
+                        plot_striped_box(im0s, xyxy, bgr_color, (0, 0, 255), conf=conf, line_thickness=2)
+                    else:
+                        # Dibujar caja normal para detecciones correctas
+                        plot_one_box(xyxy, im0s, color=bgr_color, line_thickness=2)
 
                     # Categorizar la confianza en rangos
                     conf_value = float(conf) * 100  # Convertir a porcentaje
@@ -358,23 +368,25 @@ def procesar_detecciones(pred, img, im0s, names, colors, txt_path, processed_ima
                                 confidence_ranges[range_key]['incorrect'] += 1
                             break
 
-        # Guardar la imagen procesada con detecciones
+        # Guardar imagen procesada
         processed_img_path = processed_images_dir / f"{Path(path).stem}_processed.jpg"
         cv2.imwrite(str(processed_img_path), im0s)
         print(f"Imagen procesada guardada en: {processed_img_path}")
+        
         image_examples.append((str(processed_img_path), expected_classes, detected_classes))
 
     if not detecciones_procesadas:
         print(" - No se encontraron detecciones válidas tras aplicar NMS.")
     
-    return image_examples, confidence_ranges
+    return image_examples, confidence_ranges, detected_classes
 
-def main(input_dir, session, input_name, output_name, img_size, conf_thres, iou_thres, classes, augment, names, data_config, weights, output_dir, key, class_colors, max_examples=20):
+def main(input_dir, img_size, model, device, half, conf_thres, iou_thres, classes, augment, names, data_config, weights, output_dir, key, class_colors, max_examples=20):
     base_path,  labels_dir, labels_dir2, processed_images_dir = configurar_rutas(input_dir, output_dir, key)
     txt_file_path = obtener_ruta_desde_yaml(data_config, key=key)
     image_paths = leer_rutas_imagenes(base_path, txt_file_path)
     image_examples = []
-
+    
+    total_detected_classes = {}  # Add this to track all detections
     total_confidence_ranges = {
         '0-10': {'correct': 0, 'incorrect': 0},
         '10-20': {'correct': 0, 'incorrect': 0},
@@ -422,34 +434,34 @@ def main(input_dir, session, input_name, output_name, img_size, conf_thres, iou_
             print(f"Advertencia: No se encontró el archivo de etiquetas para {img_path}")
 
         # Cargar imágenes
-        dataset = LoadImages(img_path, img_size=img_size)
+        dataset = LoadImages(img_path, img_size=img_size, stride=int(model.stride.max()))
 
         
         #for path, img, im0s, vid_cap in dataset:
         path, img, im0s, vid_cap = next(iter(dataset))
 
+        img = preprocesar_imagen(img, device, half)
+        pred = realizar_inferencia(model, img, augment=augment, conf_thres=conf_thres, iou_thres=iou_thres, classes=classes, agnostic_nms=False)
         
-        # Obtener shapes
-        shapes = (im0s.shape[0], im0s.shape[1])  # altura, anchura de la imagen original
-        
-        img = preprocesar_imagen(img, im0s, img_size)
-        preds = session.run([output_name], {input_name: img})[0]
-        preds = torch.tensor(preds)  # Convertir a tensor
-        pred = realizar_inferencia(img, session, input_name=input_name, output_name=output_name, conf_thres=conf_thres, iou_thres=iou_thres, classes=classes, agnostic_nms=False)
-           
         txt_path = labels_dir2 / f"{Path(path).stem}.txt"
-        image_examples, conf_ranges = procesar_detecciones(
+        image_examples, conf_ranges, current_detected_classes = procesar_detecciones(
             pred, img, im0s, names, class_colors, txt_path, 
-            processed_images_dir, path, image_examples, 
-            expected_classes, expected_classes_coordinates
+            processed_images_dir, path, image_examples, expected_classes,
+            expected_classes_coordinates  # Añadir este parámetro
         )
-
-        # Acumular los conteos de rangos de confianza
+        
+        # Update total detections
+        for cls, count in current_detected_classes.items():
+            total_detected_classes[cls] = total_detected_classes.get(cls, 0) + count
+            
+        # Acumular rangos de confianza
         for range_key in conf_ranges:
             total_confidence_ranges[range_key]['correct'] += conf_ranges[range_key]['correct']
             total_confidence_ranges[range_key]['incorrect'] += conf_ranges[range_key]['incorrect']
 
-    test_onnx.opt = Opt(key)
+           # break
+
+    test_.opt = Opt(key)
 
     print(data_config)
 
@@ -459,13 +471,13 @@ def main(input_dir, session, input_name, output_name, img_size, conf_thres, iou_
     if not isinstance(data, dict):
         raise ValueError("Error: El archivo YAML no se cargó correctamente como un diccionario.")
 
-    results, maps, times, metrics_class, dataset_stats = test_onnx.test(
+    results, maps, times, metrics_class, dataset_stats = test_.test(
         data=data,
         weights=weights,
-        batch_size=1,
+        batch_size=8,
         imgsz=1024,
-        conf_thres=0.25,
-        iou_thres=0.5,
+        conf_thres=0.10,
+        iou_thres=0.6,
         save_json=False,
         save_txt=True,
         save_hybrid=False,
@@ -488,9 +500,7 @@ def main(input_dir, session, input_name, output_name, img_size, conf_thres, iou_
         "times": times
     }
 
-
-
-    out = output_dir +  "/" + key + "_" + "onnx" + "_" "report.pdf"  # Concatenación directa
+    out = output_dir +  "/" + key + "_" + "pt" + "_" "report.pdf"  # Concatenación directa
 
     generate_pdf_with_front_page(
         pdf_path=out,
@@ -501,32 +511,39 @@ def main(input_dir, session, input_name, output_name, img_size, conf_thres, iou_
         image_examples = image_examples, 
         class_colors=class_colors,
         metrics_classes=metrics_class,
-        dataset_stats=dataset_stats,  # Añadir estadísticas del dataset
-        confidence_ranges=total_confidence_ranges,  # Añadir rangos de confianza
+        dataset_stats=dataset_stats,
+        confidence_ranges=total_confidence_ranges,
         max_examples=max_examples
     )
     
     return None
 
 
+    # Configuración más segura del dispositivo
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Script for running the detection pipeline.")
 
-    parser.add_argument('--input_dir', type=str, default="/app/pfs/eosinofilos",help="Directorio del proyecto")
-    parser.add_argument('--output_dir', type=str,help="Directorio de salida")
-    parser.add_argument('--img_size', type=int, default=1024,help="Tamaño de las imágenes para el modelo")
-    parser.add_argument('--conf_thres', type=float, default=0.25,help="Umbral de confianza")
-    parser.add_argument('--iou_thres', type=float, default=0.5,help="Umbral de IoU")
-    parser.add_argument('--augment', type=bool, default=False,help="Augmentación durante la inferencia")
-    parser.add_argument('--weights', type=str, default="/app/weights/best.pt",help="Ruta al modelo")
-    parser.add_argument('--key', type=str, default="test",help="Dataset a testear")
+    parser.add_argument('--input_dir', type=str, default="/app/pfs/eosinofilos", help="Directorio del proyecto")
+    parser.add_argument('--output_dir', type=str, help="Directorio de salida")
+    parser.add_argument('--img_size', type=int, default=1024, help="Tamaño de las imágenes para el modelo")
+    parser.add_argument('--conf_thres', type=float, default=0.10, help="Umbral de confianza")
+    parser.add_argument('--iou_thres', type=float, default=0.6, help="Umbral de IoU")
+    parser.add_argument('--augment', type=bool, default=False, help="Augmentación durante la inferencia")
+    parser.add_argument('--weights', type=str, default="/app/weights/best.pt", help="Ruta al modelo")
+    parser.add_argument('--key', type=str, default="test", help="Dataset a testear")
     parser.add_argument('--max_examples', type=int, default=20, help="Numero de imagenes de ejemplo")
     
-    
     args = parser.parse_args()
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    #device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-
+    
+    # Modificar la configuración del dispositivo
+    if torch.cuda.is_available():
+        device = 'cuda'
+        print(f"CUDA está disponible ({torch.cuda.device_count()} dispositivos)")
+    else:
+        device = 'cpu'
+        print("CUDA no está disponible, usando CPU")
 
     input_dir_path = Path(args.input_dir)
     if not input_dir_path.is_dir():
@@ -541,29 +558,26 @@ if __name__ == "__main__":
     data_config = yaml_files[0]
     print(f"Archivo de configuración encontrado: {data_config}")
     
-    session, input_name, output_name = load_model(args.weights, device)
-    for input in session.get_inputs():
-        print(f"Nombre de entrada: {input.name}, Forma esperada: {input.shape}, Tipo: {input.type}")
-    names, class_colors = get_names_colors(data_config)
+    model, half = load_model(args.weights, device)
+    names, class_colors = get_names_colors(model)
 
-
-    #print(f"Device: {device}, Half precision: {half}")
+    print(f"Device: {device}, Half precision: {half}")
 
     main(
-            input_dir=input_dir_path,
-            session = session,
-            input_name=input_name,
-            output_name=output_name,
-            img_size=args.img_size,
-            conf_thres=args.conf_thres,
-            iou_thres=args.iou_thres,
-            classes=None,
-            augment=args.augment,
-            names=names,
-            data_config=data_config,
-            weights=args.weights,
-            output_dir=args.output_dir,
-            key = args.key,
-            class_colors=class_colors,
-            max_examples=args.max_examples
-        )
+        input_dir=input_dir_path,
+        img_size=args.img_size,
+        model=model,
+        device=device,
+        half=half,
+        conf_thres=args.conf_thres,
+        iou_thres=args.iou_thres,
+        classes=None,
+        augment=args.augment,
+        names=names,
+        data_config=data_config,
+        weights=args.weights,
+        output_dir=args.output_dir,
+        key=args.key,
+        class_colors=class_colors,
+        max_examples=args.max_examples
+    )
